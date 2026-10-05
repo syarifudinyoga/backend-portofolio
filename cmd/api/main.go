@@ -15,27 +15,34 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"portfolio/backend/migrations"
 )
 
 type portfolio struct {
-	Profile     profile      `json:"profile"`
-	Experiences []experience `json:"experiences"`
-	Education   []education  `json:"education"`
-	Skills      []skill      `json:"skills"`
-	TechStack   []tech       `json:"techStack"`
-	Projects    []project    `json:"projects"`
+	Profile        profile           `json:"profile"`
+	Experiences    []experience      `json:"experiences"`
+	Education      []education       `json:"education"`
+	Certifications []certification   `json:"certifications"`
+	Texts          map[string]string `json:"texts"`
+	Skills         []skill           `json:"skills"`
+	TechStack      []tech            `json:"techStack"`
+	Projects       []project         `json:"projects"`
 }
 
 type profile struct {
-	Name      string `json:"name"`
-	Role      string `json:"role"`
-	Headline  string `json:"headline"`
-	About     string `json:"about"`
-	Location  string `json:"location"`
-	Email     string `json:"email"`
-	Website   string `json:"website"`
-	AvatarURL string `json:"avatarUrl"`
-	ResumeURL string `json:"resumeUrl"`
+	Name         string `json:"name"`
+	Role         string `json:"role"`
+	Headline     string `json:"headline"`
+	About        string `json:"about"`
+	Location     string `json:"location"`
+	Email        string `json:"email"`
+	Website      string `json:"website"`
+	AvatarURL    string `json:"avatarUrl"`
+	ResumeURL    string `json:"resumeUrl"`
+	GithubURL    string `json:"githubUrl"`
+	InstagramURL string `json:"instagramUrl"`
+	TwitterURL   string `json:"twitterUrl"`
+	LinkedinURL  string `json:"linkedinUrl"`
 }
 
 type experience struct {
@@ -57,6 +64,14 @@ type education struct {
 	StartDate   string  `json:"startDate"`
 	EndDate     *string `json:"endDate"`
 	Description string  `json:"description"`
+}
+
+type certification struct {
+	ID            int64   `json:"id"`
+	Name          string  `json:"name"`
+	Issuer        string  `json:"issuer"`
+	IssuedDate    *string `json:"issuedDate"`
+	CredentialURL string  `json:"credentialUrl"`
 }
 
 type skill struct {
@@ -89,11 +104,18 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	pool, err := connectDatabase(ctx, databaseURL())
+	pool, err := connectDatabase(ctx, logger, databaseURL())
 	if err != nil {
-		logger.Fatalf("connect to database: %v", err)
+		logger.Fatalf("startup aborted: database connection failed: %v", err)
 	}
 	defer pool.Close()
+	logger.Printf("database: connected successfully")
+	if err := migrations.Apply(ctx, pool); err != nil {
+		logger.Fatalf("apply database migrations: %v", err)
+	}
+	logger.Printf("database: migrations are up to date")
+
+	media := connectMedia(ctx, logger)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, r *http.Request) {
@@ -116,14 +138,39 @@ func main() {
 			logger.Printf("encode portfolio response: %v", err)
 		}
 	})
+	mux.HandleFunc("POST /api/admin/auth", handleAdminAuth)
+	mux.HandleFunc("PUT /api/admin/portfolio", func(w http.ResponseWriter, r *http.Request) {
+		if !authorizeAdmin(w, r) {
+			return
+		}
+		handleSavePortfolio(w, r, pool, logger)
+	})
+
+	mux.HandleFunc("POST /api/admin/upload", func(w http.ResponseWriter, r *http.Request) {
+		if !authorizeAdmin(w, r) {
+			return
+		}
+		if media == nil {
+			http.Error(w, "MinIO belum dikonfigurasi atau tidak terhubung; cek log backend dan isi MINIO_* di .env", http.StatusServiceUnavailable)
+			return
+		}
+		media.handleUpload(w, r, logger)
+	})
+	mux.HandleFunc("GET /api/media/{name...}", func(w http.ResponseWriter, r *http.Request) {
+		if media == nil {
+			http.NotFound(w, r)
+			return
+		}
+		media.handleServe(w, r, logger)
+	})
 
 	server := &http.Server{
-		Addr:              envOr("PORT", "8080"),
+		Addr:              net.JoinHostPort(envOr("HOST", "127.0.0.1"), envOr("PORT", "8080")),
 		Handler:           withHeaders(mux),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	go func() {
-		logger.Printf("listening on :%s", envOr("PORT", "8080"))
+		logger.Printf("http: listening on %s", server.Addr)
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Fatalf("serve HTTP: %v", err)
 		}
@@ -153,48 +200,40 @@ func databaseURL() string {
 	return connectionURL.String()
 }
 
-func connectDatabase(ctx context.Context, url string) (*pgxpool.Pool, error) {
-	config, err := pgxpool.ParseConfig(url)
+func connectDatabase(ctx context.Context, logger *log.Logger, connectionURL string) (*pgxpool.Pool, error) {
+	config, err := pgxpool.ParseConfig(connectionURL)
 	if err != nil {
+		logger.Printf("database: invalid connection configuration: %v", err)
 		return nil, err
 	}
 	config.MaxConns = 10
 	config.MinConns = 1
 	config.MaxConnLifetime = 30 * time.Minute
 
-	var pool *pgxpool.Pool
-	for attempt := 0; attempt < 20; attempt++ {
-		pool, err = pgxpool.NewWithConfig(ctx, config)
-		if err != nil {
-			return nil, err
-		}
-		pingCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-		err = pool.Ping(pingCtx)
-		cancel()
-		if err == nil {
-			return pool, nil
-		}
-		pool.Close()
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		timer := time.NewTimer(time.Duration(attempt+1) * time.Second)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return nil, ctx.Err()
-		case <-timer.C:
-		}
+	logger.Printf("database: connecting host=%s port=%d database=%s user=%s",
+		config.ConnConfig.Host, config.ConnConfig.Port, config.ConnConfig.Database, config.ConnConfig.User)
+	pool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		logger.Printf("database: connection failed: %v", err)
+		return nil, err
 	}
-	return nil, err
+	pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := pool.Ping(pingCtx); err != nil {
+		pool.Close()
+		logger.Printf("database: connection failed: %v", err)
+		return nil, err
+	}
+	return pool, nil
 }
 
 func loadPortfolio(ctx context.Context, db *pgxpool.Pool) (portfolio, error) {
 	var result portfolio
-	if err := db.QueryRow(ctx, `SELECT name, role, headline, about, location, email, website, avatar_url, resume_url FROM profile WHERE id = 1`).
+	if err := db.QueryRow(ctx, `SELECT name, role, headline, about, location, email, website, avatar_url, resume_url, github_url, instagram_url, twitter_url, linkedin_url, ui_texts FROM profile WHERE id = 1`).
 		Scan(&result.Profile.Name, &result.Profile.Role, &result.Profile.Headline, &result.Profile.About,
 			&result.Profile.Location, &result.Profile.Email, &result.Profile.Website,
-			&result.Profile.AvatarURL, &result.Profile.ResumeURL); err != nil {
+			&result.Profile.AvatarURL, &result.Profile.ResumeURL, &result.Profile.GithubURL,
+			&result.Profile.InstagramURL, &result.Profile.TwitterURL, &result.Profile.LinkedinURL, &result.Texts); err != nil {
 		return portfolio{}, err
 	}
 	result.Experiences = []experience{}
@@ -234,6 +273,26 @@ func loadPortfolio(ctx context.Context, db *pgxpool.Pool) (portfolio, error) {
 			return portfolio{}, err
 		}
 		result.Education = append(result.Education, item)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return portfolio{}, err
+	}
+	rows.Close()
+
+	result.Certifications = []certification{}
+	rows, err = db.Query(ctx, `SELECT id, name, issuer, issued_date::text, credential_url
+		FROM certifications ORDER BY issued_date DESC NULLS LAST, sort_order, id`)
+	if err != nil {
+		return portfolio{}, err
+	}
+	for rows.Next() {
+		var item certification
+		if err := rows.Scan(&item.ID, &item.Name, &item.Issuer, &item.IssuedDate, &item.CredentialURL); err != nil {
+			rows.Close()
+			return portfolio{}, err
+		}
+		result.Certifications = append(result.Certifications, item)
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()

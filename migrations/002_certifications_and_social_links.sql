@@ -1,0 +1,14 @@
+ALTER TABLE profile
+    ADD COLUMN IF NOT EXISTS github_url TEXT NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS instagram_url TEXT NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS twitter_url TEXT NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS linkedin_url TEXT NOT NULL DEFAULT '';
+
+CREATE TABLE IF NOT EXISTS certifications (
+    id BIGSERIAL PRIMARY KEY,
+    name TEXT NOT NULL,
+    issuer TEXT NOT NULL DEFAULT '',
+    issued_date DATE,
+    credential_url TEXT NOT NULL DEFAULT '',
+    sort_order INTEGER NOT NULL DEFAULT 0
+);

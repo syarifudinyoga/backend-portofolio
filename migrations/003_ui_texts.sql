@@ -1,0 +1,2 @@
+ALTER TABLE profile
+    ADD COLUMN IF NOT EXISTS ui_texts JSONB NOT NULL DEFAULT '{}'::jsonb;
