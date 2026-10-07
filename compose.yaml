@@ -2,7 +2,7 @@ services:
   api:
     container_name: portfolio-api
     hostname: api
-    image: ghcr.io/${GHCR_NAMESPACE:?Set GHCR_NAMESPACE}/portfolio-backend:${VERSION:-latest}
+    image: ghcr.io/${GHCR_NAMESPACE:?Set GHCR_NAMESPACE}/portfolio-backend:${VERSION:?Set VERSION}
     env_file:
       - .env
     ports:

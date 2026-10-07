@@ -9,8 +9,8 @@ pipeline {
   parameters {
     string(
       name: 'VERSION',
-      defaultValue: 'latest',
-      description: 'Image tag version (e.g. latest, v1.0.0, etc.)',
+      defaultValue: '1.0.0',
+      description: 'Image tag version (e.g. 1.0.0, 1.0.1, 2.0.0, etc.)',
       trim: true
     )
     string(
@@ -82,7 +82,6 @@ pipeline {
               --platform linux/amd64,linux/arm64 \
               --push \
               --tag "ghcr.io/${GHCR_NAMESPACE}/${BACKEND_IMAGE}:${VERSION}" \
-              --tag "ghcr.io/${GHCR_NAMESPACE}/${BACKEND_IMAGE}:latest" \
               --file Containerfile \
               .
           '''
