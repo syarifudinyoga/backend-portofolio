@@ -208,8 +208,7 @@ REMOTE
 set -u
 echo "Waiting for PostgreSQL container..."
 for i in $(seq 1 30); do
-  if podman exec portfolio-postgres pg_isready -U postgres >/dev/null 2>&1 || \
-     podman exec postgres pg_isready -U postgres >/dev/null 2>&1; then
+  if podman exec portfolio-postgres pg_isready -U postgres >/dev/null 2>&1; then
     echo "PostgreSQL is ready."
     exit 0
   fi
@@ -232,7 +231,7 @@ REMOTE
 set -u
 echo "Waiting for MinIO container..."
 for i in $(seq 1 30); do
-  if curl --silent --fail http://127.0.0.1:9000/minio/health/ready >/dev/null 2>&1; then
+  if curl --silent --fail http://127.0.0.1:9010/minio/health/ready >/dev/null 2>&1; then
     echo "MinIO is ready."
     exit 0
   fi
@@ -286,7 +285,9 @@ REMOTE
           sh '''
             ssh -o StrictHostKeyChecking=yes \
               ${VPS_USER}@${VPS_HOST} \
-              "cd ${VPS_DIR} && GHCR_NAMESPACE=${GHCR_NAMESPACE} VERSION=${VERSION} ${PODMAN_COMPOSE} up -d --no-deps --force-recreate api"
+              "cd ${VPS_DIR} && \
+               podman rm -f portfolio-api 2>/dev/null || true; \
+               GHCR_NAMESPACE=${GHCR_NAMESPACE} VERSION=${VERSION} ${PODMAN_COMPOSE} up -d api"
           '''
         }
       }
