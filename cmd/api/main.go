@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"log"
 	"net"
@@ -121,6 +122,35 @@ func main() {
 	media := connectMedia(ctx, logger)
 
 	mux := http.NewServeMux()
+
+	testHandler := func(w http.ResponseWriter, r *http.Request) {
+		dbStatus := "connected"
+		if err := pool.Ping(r.Context()); err != nil {
+			dbStatus = "error: " + err.Error()
+		}
+		minioStatus := "disabled"
+		if media != nil {
+			minioStatus = "connected"
+		}
+
+		response := map[string]any{
+			"status":   "ok",
+			"message":  "Portfolio Backend API is running",
+			"database": dbStatus,
+			"minio":    minioStatus,
+			"time":     time.Now().UTC().Format(time.RFC3339),
+		}
+
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(response)
+	}
+
+	mux.HandleFunc("GET /test", testHandler)
+	mux.HandleFunc("GET /api/test", testHandler)
+	mux.HandleFunc("GET /healthz", testHandler)
+	mux.HandleFunc("GET /{$}", testHandler)
+
 	mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, r *http.Request) {
 		if err := pool.Ping(r.Context()); err != nil {
 			http.Error(w, "database unavailable", http.StatusServiceUnavailable)
