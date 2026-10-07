@@ -1,7 +1,9 @@
 # ==========================================
 # Stage 1: Build Go Binary
 # ==========================================
-FROM golang:1.24-alpine AS builder
+FROM golang:alpine AS builder
+
+ENV GOTOOLCHAIN=auto
 
 RUN apk add --no-cache git ca-certificates tzdata
 
