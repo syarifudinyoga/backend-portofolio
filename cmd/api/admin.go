@@ -50,7 +50,7 @@ func authorizeAdmin(w http.ResponseWriter, r *http.Request) bool {
 
 func validAdminKey(candidate string) bool {
 	configured := os.Getenv("ADMIN_KEY")
-	if len(configured) < 32 || candidate == "" {
+	if len(configured) < 16 || candidate == "" {
 		return false
 	}
 	configuredHash := sha256.Sum256([]byte(configured))
