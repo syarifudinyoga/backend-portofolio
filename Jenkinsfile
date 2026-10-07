@@ -82,6 +82,7 @@ pipeline {
               --platform linux/amd64,linux/arm64 \
               --push \
               --tag "ghcr.io/${GHCR_NAMESPACE}/${BACKEND_IMAGE}:${VERSION}" \
+              --tag "ghcr.io/${GHCR_NAMESPACE}/${BACKEND_IMAGE}:latest" \
               --file Containerfile \
               .
           '''
