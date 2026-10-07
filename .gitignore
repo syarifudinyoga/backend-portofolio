@@ -2,3 +2,4 @@
 *.log
 portfolio-api
 .DS_Store
+backend.env

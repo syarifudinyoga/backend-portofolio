@@ -368,10 +368,77 @@ func loadPortfolio(ctx context.Context, db *pgxpool.Pool) (portfolio, error) {
 	return result, nil
 }
 
+func originMatches(pattern, origin string) bool {
+	if pattern == "*" || pattern == "" {
+		return true
+	}
+	if strings.EqualFold(pattern, origin) {
+		return true
+	}
+	parsedOrigin, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	host := parsedOrigin.Hostname()
+
+	cleanPattern := strings.TrimPrefix(pattern, "https://")
+	cleanPattern = strings.TrimPrefix(cleanPattern, "http://")
+	if strings.HasPrefix(cleanPattern, "*.") {
+		suffix := strings.TrimPrefix(cleanPattern, "*.")
+		return strings.EqualFold(host, suffix) || strings.HasSuffix(strings.ToLower(host), "."+strings.ToLower(suffix))
+	}
+	return false
+}
+
 func withHeaders(next http.Handler) http.Handler {
+	allowedOrigins := strings.TrimSpace(os.Getenv("FRONTEND_ORIGINS"))
+	var originsList []string
+	if allowedOrigins != "" {
+		for _, o := range strings.Split(allowedOrigins, ",") {
+			trimmed := strings.TrimSpace(o)
+			if trimmed != "" {
+				originsList = append(originsList, trimmed)
+			}
+		}
+	}
+
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin := r.Header.Get("Origin")
+
+		if origin != "" {
+			allowed := false
+			if allowedOrigins == "" || allowedOrigins == "*" {
+				allowed = true
+			} else {
+				for _, p := range originsList {
+					if originMatches(p, origin) {
+						allowed = true
+						break
+					}
+				}
+			}
+
+			if allowed {
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+				w.Header().Set("Access-Control-Allow-Credentials", "true")
+			}
+		} else {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+		}
+
+		w.Header().Set("Vary", "Origin, Access-Control-Request-Method, Access-Control-Request-Headers")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Accept, X-Payload-Encrypted, Origin")
+		w.Header().Set("Access-Control-Expose-Headers", "Content-Type, Content-Length, X-Payload-Encrypted")
+		w.Header().Set("Access-Control-Max-Age", "86400")
+
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+
 		w.Header().Set("X-Content-Type-Options", "nosniff")
-		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("X-Frame-Options", "SAMEORIGIN")
 		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
 		next.ServeHTTP(w, r)
 	})
