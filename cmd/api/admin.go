@@ -24,7 +24,7 @@ type authRequest struct {
 
 func handleAdminAuth(w http.ResponseWriter, r *http.Request) {
 	var request authRequest
-	if err := decodeJSON(w, r, &request); err != nil {
+	if err := readPayload(r, &request); err != nil {
 		http.Error(w, "request JSON tidak valid", http.StatusBadRequest)
 		return
 	}
@@ -33,7 +33,9 @@ func handleAdminAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, http.StatusOK, map[string]bool{"authenticated": true})
+	if err := writeEncryptedJSON(w, http.StatusOK, map[string]bool{"authenticated": true}); err != nil {
+		http.Error(w, "gagal mengenkripsi respons", http.StatusInternalServerError)
+	}
 }
 
 func authorizeAdmin(w http.ResponseWriter, r *http.Request) bool {
@@ -58,8 +60,8 @@ func validAdminKey(candidate string) bool {
 
 func handleSavePortfolio(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool, logger *log.Logger) {
 	var data portfolio
-	if err := decodeJSON(w, r, &data); err != nil {
-		http.Error(w, "request JSON tidak valid atau melebihi batas 2 MB", http.StatusBadRequest)
+	if err := readPayload(r, &data); err != nil {
+		http.Error(w, "request JSON tidak valid atau gagal didekripsi: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 	if err := validatePortfolio(data); err != nil {
@@ -71,7 +73,9 @@ func handleSavePortfolio(w http.ResponseWriter, r *http.Request, db *pgxpool.Poo
 		http.Error(w, "gagal menyimpan portfolio", http.StatusInternalServerError)
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	if err := writeEncryptedJSON(w, http.StatusOK, map[string]string{"message": "perubahan berhasil disimpan"}); err != nil {
+		w.WriteHeader(http.StatusNoContent)
+	}
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, target any) error {
@@ -283,9 +287,13 @@ func savePortfolio(r *http.Request, db *pgxpool.Pool, data portfolio) error {
 		}
 	}
 	for _, item := range data.Projects {
-		if _, err := tx.Exec(ctx, `INSERT INTO projects (title, category, description, year, image_url, live_url, repo_url, tech)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-			item.Title, item.Category, item.Description, item.Year, item.ImageURL, item.LiveURL, item.RepoURL, item.Tech); err != nil {
+		projectType := strings.TrimSpace(item.ProjectType)
+		if projectType == "" {
+			projectType = "work"
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO projects (title, category, project_type, description, year, image_url, video_url, live_url, repo_url, tech)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+			item.Title, item.Category, projectType, item.Description, item.Year, item.ImageURL, item.VideoURL, item.LiveURL, item.RepoURL, item.Tech); err != nil {
 			return fmt.Errorf("save project %q: %w", item.Title, err)
 		}
 	}

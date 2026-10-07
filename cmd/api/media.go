@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -19,15 +20,20 @@ import (
 )
 
 const (
-	maxUploadBytes = 8 << 20
+	maxUploadBytes = 100 << 20 // 100 MB
 	mediaPrefix    = "images/"
 )
 
-var allowedImageTypes = map[string]string{
-	"image/jpeg": ".jpg",
-	"image/png":  ".png",
-	"image/webp": ".webp",
-	"image/gif":  ".gif",
+var allowedMediaTypes = map[string]string{
+	"image/jpeg":      ".jpg",
+	"image/png":       ".png",
+	"image/webp":      ".webp",
+	"image/gif":       ".gif",
+	"image/svg+xml":   ".svg",
+	"video/mp4":       ".mp4",
+	"video/webm":      ".webm",
+	"video/quicktime": ".mov",
+	"video/ogg":       ".ogv",
 }
 
 type mediaStore struct {
@@ -41,7 +47,7 @@ func connectMedia(ctx context.Context, logger *log.Logger) *mediaStore {
 	accessKey := strings.TrimSpace(os.Getenv("MINIO_ACCESS_KEY"))
 	secretKey := strings.TrimSpace(os.Getenv("MINIO_SECRET_KEY"))
 	if endpoint == "" || accessKey == "" || secretKey == "" {
-		logger.Printf("minio: not configured (set MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY); image upload disabled")
+		logger.Printf("minio: not configured (set MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY); media upload disabled")
 		return nil
 	}
 	bucket := envOr("MINIO_BUCKET", "portfolio")
@@ -77,7 +83,7 @@ func connectMedia(ctx context.Context, logger *log.Logger) *mediaStore {
 func (m *mediaStore) handleUpload(w http.ResponseWriter, r *http.Request, logger *log.Logger) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxUploadBytes+1<<20)
 	if err := r.ParseMultipartForm(maxUploadBytes); err != nil {
-		http.Error(w, "upload gagal atau file lebih dari 8 MB", http.StatusRequestEntityTooLarge)
+		http.Error(w, "upload gagal atau ukuran file melebihi 100 MB", http.StatusRequestEntityTooLarge)
 		return
 	}
 	file, header, err := r.FormFile("file")
@@ -87,7 +93,7 @@ func (m *mediaStore) handleUpload(w http.ResponseWriter, r *http.Request, logger
 	}
 	defer file.Close()
 	if header.Size > maxUploadBytes {
-		http.Error(w, "ukuran file maksimal 8 MB", http.StatusRequestEntityTooLarge)
+		http.Error(w, "ukuran file maksimal 100 MB", http.StatusRequestEntityTooLarge)
 		return
 	}
 	sniff := make([]byte, 512)
@@ -97,9 +103,30 @@ func (m *mediaStore) handleUpload(w http.ResponseWriter, r *http.Request, logger
 		return
 	}
 	contentType := http.DetectContentType(sniff[:n])
-	ext, ok := allowedImageTypes[contentType]
+	ext, ok := allowedMediaTypes[contentType]
 	if !ok {
-		http.Error(w, "format harus JPG, PNG, WebP, atau GIF", http.StatusUnsupportedMediaType)
+		lowerExt := strings.ToLower(filepath.Ext(header.Filename))
+		switch lowerExt {
+		case ".mp4":
+			contentType = "video/mp4"
+			ext = ".mp4"
+			ok = true
+		case ".webm":
+			contentType = "video/webm"
+			ext = ".webm"
+			ok = true
+		case ".mov":
+			contentType = "video/quicktime"
+			ext = ".mov"
+			ok = true
+		case ".svg":
+			contentType = "image/svg+xml"
+			ext = ".svg"
+			ok = true
+		}
+	}
+	if !ok {
+		http.Error(w, "format harus gambar (JPG, PNG, WebP, GIF, SVG) atau video (MP4, WebM, MOV)", http.StatusUnsupportedMediaType)
 		return
 	}
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
@@ -118,8 +145,9 @@ func (m *mediaStore) handleUpload(w http.ResponseWriter, r *http.Request, logger
 		http.Error(w, "gagal menyimpan ke MinIO: "+err.Error(), http.StatusBadGateway)
 		return
 	}
-	logger.Printf("minio: uploaded %s (%d bytes)", name, header.Size)
-	writeJSON(w, http.StatusCreated, map[string]string{"url": "/api/media/" + name})
+	if err := writeEncryptedJSON(w, http.StatusCreated, map[string]string{"url": "/api/media/" + name}); err != nil {
+		logger.Printf("minio: encrypt upload response failed: %v", err)
+	}
 }
 
 func (m *mediaStore) handleServe(w http.ResponseWriter, r *http.Request, logger *log.Logger) {
@@ -141,16 +169,17 @@ func (m *mediaStore) handleServe(w http.ResponseWriter, r *http.Request, logger 
 			return
 		}
 		logger.Printf("minio: read %s failed: %v", name, err)
-		http.Error(w, "gambar tidak tersedia", http.StatusBadGateway)
+		http.Error(w, "media tidak tersedia", http.StatusBadGateway)
 		return
 	}
-	if _, ok := map[string]bool{"image/jpeg": true, "image/png": true, "image/webp": true, "image/gif": true}[info.ContentType]; !ok {
+	if _, ok := allowedMediaTypes[info.ContentType]; !ok {
 		http.NotFound(w, r)
 		return
 	}
 	w.Header().Set("Content-Type", info.ContentType)
 	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 	w.Header().Set("Content-Length", fmt.Sprint(info.Size))
+	w.Header().Set("Accept-Ranges", "bytes")
 	if _, err := io.Copy(w, object); err != nil {
 		logger.Printf("minio: stream %s: %v", name, err)
 	}

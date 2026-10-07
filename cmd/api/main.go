@@ -1,8 +1,8 @@
 package main
 
 import (
+	"bufio"
 	"context"
-	"encoding/json"
 	"errors"
 	"log"
 	"net"
@@ -91,15 +91,18 @@ type project struct {
 	ID          int64    `json:"id"`
 	Title       string   `json:"title"`
 	Category    string   `json:"category"`
+	ProjectType string   `json:"projectType"`
 	Description string   `json:"description"`
 	Year        int      `json:"year"`
 	ImageURL    string   `json:"imageUrl"`
+	VideoURL    string   `json:"videoUrl"`
 	LiveURL     string   `json:"liveUrl"`
 	RepoURL     string   `json:"repoUrl"`
 	Tech        []string `json:"tech"`
 }
 
 func main() {
+	loadEnvFiles(".env", "backend/.env", "../.env")
 	logger := log.New(os.Stdout, "portfolio-api ", log.LstdFlags|log.LUTC)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -132,10 +135,8 @@ func main() {
 			http.Error(w, "could not load portfolio", http.StatusInternalServerError)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		w.Header().Set("Cache-Control", "no-store")
-		if err := json.NewEncoder(w).Encode(data); err != nil {
-			logger.Printf("encode portfolio response: %v", err)
+		if err := writeEncryptedJSON(w, http.StatusOK, data); err != nil {
+			logger.Printf("write encrypted portfolio response: %v", err)
 		}
 	})
 	mux.HandleFunc("POST /api/admin/auth", handleAdminAuth)
@@ -155,6 +156,12 @@ func main() {
 			return
 		}
 		media.handleUpload(w, r, logger)
+	})
+	mux.HandleFunc("POST /api/admin/parse-cv", func(w http.ResponseWriter, r *http.Request) {
+		if !authorizeAdmin(w, r) {
+			return
+		}
+		handleParseCV(w, r, logger)
 	})
 	mux.HandleFunc("GET /api/media/{name...}", func(w http.ResponseWriter, r *http.Request) {
 		if media == nil {
@@ -339,15 +346,15 @@ func loadPortfolio(ctx context.Context, db *pgxpool.Pool) (portfolio, error) {
 	rows.Close()
 
 	result.Projects = []project{}
-	rows, err = db.Query(ctx, `SELECT id, title, category, description, year, image_url, live_url, repo_url, tech
+	rows, err = db.Query(ctx, `SELECT id, title, category, COALESCE(project_type, 'work'), description, year, image_url, video_url, live_url, repo_url, tech
 		FROM projects ORDER BY year DESC, id DESC`)
 	if err != nil {
 		return portfolio{}, err
 	}
 	for rows.Next() {
 		var item project
-		if err := rows.Scan(&item.ID, &item.Title, &item.Category, &item.Description,
-			&item.Year, &item.ImageURL, &item.LiveURL, &item.RepoURL, &item.Tech); err != nil {
+		if err := rows.Scan(&item.ID, &item.Title, &item.Category, &item.ProjectType, &item.Description,
+			&item.Year, &item.ImageURL, &item.VideoURL, &item.LiveURL, &item.RepoURL, &item.Tech); err != nil {
 			rows.Close()
 			return portfolio{}, err
 		}
@@ -375,4 +382,31 @@ func envOr(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func loadEnvFiles(paths ...string) {
+	for _, path := range paths {
+		file, err := os.Open(path)
+		if err != nil {
+			continue
+		}
+		scanner := bufio.NewScanner(file)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			parts := strings.SplitN(line, "=", 2)
+			if len(parts) == 2 {
+				key := strings.TrimSpace(parts[0])
+				val := strings.TrimSpace(parts[1])
+				val = strings.Trim(val, `"'`)
+				if os.Getenv(key) == "" {
+					os.Setenv(key, val)
+				}
+			}
+		}
+		_ = file.Close()
+		break
+	}
 }
