@@ -1,55 +1,12 @@
 services:
-
-  postgres:
-    container_name: portfolio-postgres
-    hostname: postgres
-    image: docker.io/library/postgres:16-alpine
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
-      POSTGRES_DB: ${POSTGRES_DB:-portfolio}
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    ports:
-      - "127.0.0.1:5433:5432"
-    restart: unless-stopped
-    networks:
-      - portfolio_default
-
-  minio:
-    container_name: portfolio-minio
-    hostname: minio
-    image: cgr.dev/chainguard/minio:latest
-    command: server /data --console-address ":9001"
-    environment:
-      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
-      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
-    volumes:
-      - minio_data:/data
-    ports:
-      - "127.0.0.1:9010:9000"
-      - "127.0.0.1:9011:9001"
-    restart: unless-stopped
-    networks:
-      - portfolio_default
-
   api:
     container_name: portfolio-api
     hostname: api
     image: ghcr.io/${GHCR_NAMESPACE:?Set GHCR_NAMESPACE}/portfolio-backend:${VERSION:-latest}
     env_file:
       - .env
-    environment:
-      POSTGRES_HOST: postgres
-      POSTGRES_PORT: "5432"
-      MINIO_ENDPOINT: minio:9000
-      HOST: "0.0.0.0"
-      PORT: "3004"
     ports:
       - "127.0.0.1:3004:3004"
-    depends_on:
-      - postgres
-      - minio
     restart: unless-stopped
     networks:
       - portfolio_default
@@ -57,7 +14,4 @@ services:
 networks:
   portfolio_default:
     name: portfolio_default
-
-volumes:
-  postgres_data:
-  minio_data:
+    external: true

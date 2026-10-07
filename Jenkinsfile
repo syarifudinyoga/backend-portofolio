@@ -157,89 +157,27 @@ REMOTE
       }
     }
 
-    stage('Prepare Network') {
+    stage('Prepare Network & Shared Services') {
       steps {
         sshagent([env.SSH_CREDENTIAL]) {
           sh '''
             ssh -o StrictHostKeyChecking=yes ${VPS_USER}@${VPS_HOST} 'bash -s' <<'REMOTE'
 set -eu
 NETWORK=portfolio_default
-CONF="$HOME/.config/cni/net.d/${NETWORK}.conflist"
-BACKEND=$(podman info --format '{{.Host.NetworkBackend}}' 2>/dev/null || echo "cni")
-
 if ! podman network exists "$NETWORK" 2>/dev/null; then
   podman network create "$NETWORK" >/dev/null
   echo "Network $NETWORK created."
 fi
 
-# CNI patch for Podman 3.x if CNI conflist exists
-if [ "$BACKEND" = "cni" ] && [ -f "$CONF" ]; then
-  if grep -q '"cniVersion": "1.0.0"' "$CONF"; then
-    sed -i 's/"cniVersion": "1.0.0"/"cniVersion": "0.4.0"/' "$CONF"
-    echo "Patched $NETWORK cniVersion to 0.4.0."
-  fi
-  grep -E 'cniVersion|dnsname' "$CONF" 2>/dev/null || true
-fi
+# Connect existing shared postgres and minio containers to portfolio network
+podman network connect "$NETWORK" postgres 2>/dev/null || true
+podman network connect "$NETWORK" minio 2>/dev/null || true
 
-echo "Network $NETWORK is valid and ready."
-REMOTE
-          '''
-        }
-      }
-    }
+# Ensure database 'portfolio' exists in postgres
+podman exec postgres psql -U postgres -tc "SELECT 1 FROM pg_database WHERE datname = 'portfolio'" | grep -q 1 || \
+  podman exec postgres psql -U postgres -c "CREATE DATABASE portfolio;"
 
-    stage('Start Infrastructure') {
-      steps {
-        sshagent([env.SSH_CREDENTIAL]) {
-          sh '''
-            ssh -o StrictHostKeyChecking=yes \
-              ${VPS_USER}@${VPS_HOST} \
-              "cd ${VPS_DIR} && GHCR_NAMESPACE=${GHCR_NAMESPACE} VERSION=${VERSION} ${PODMAN_COMPOSE} up -d postgres minio"
-          '''
-        }
-      }
-    }
-
-    stage('Wait for PostgreSQL') {
-      steps {
-        sshagent([env.SSH_CREDENTIAL]) {
-          sh '''
-            ssh -o StrictHostKeyChecking=yes ${VPS_USER}@${VPS_HOST} 'bash -s' <<'REMOTE'
-set -u
-echo "Waiting for PostgreSQL container..."
-for i in $(seq 1 30); do
-  if podman exec portfolio-postgres pg_isready -U postgres >/dev/null 2>&1; then
-    echo "PostgreSQL is ready."
-    exit 0
-  fi
-  echo "Waiting for PostgreSQL (attempt $i/30)..."
-  sleep 2
-done
-echo "PostgreSQL did not become ready after 60 seconds"
-exit 1
-REMOTE
-          '''
-        }
-      }
-    }
-
-    stage('Wait for MinIO') {
-      steps {
-        sshagent([env.SSH_CREDENTIAL]) {
-          sh '''
-            ssh -o StrictHostKeyChecking=yes ${VPS_USER}@${VPS_HOST} 'bash -s' <<'REMOTE'
-set -u
-echo "Waiting for MinIO container..."
-for i in $(seq 1 30); do
-  if curl --silent --fail http://127.0.0.1:9010/minio/health/ready >/dev/null 2>&1; then
-    echo "MinIO is ready."
-    exit 0
-  fi
-  echo "Waiting for MinIO (attempt $i/30)..."
-  sleep 2
-done
-echo "MinIO did not become ready after 60 seconds"
-exit 1
+echo "Network $NETWORK is valid and connected to shared postgres & minio."
 REMOTE
           '''
         }
