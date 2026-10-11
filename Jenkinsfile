@@ -161,7 +161,8 @@ REMOTE
       steps {
         sshagent([env.SSH_CREDENTIAL]) {
           sh '''
-            ssh -o StrictHostKeyChecking=yes ${VPS_USER}@${VPS_HOST} 'bash -s' <<'REMOTE'
+            ssh -o StrictHostKeyChecking=yes ${VPS_USER}@${VPS_HOST} \
+              "cd ${VPS_DIR} && GHCR_NAMESPACE=${GHCR_NAMESPACE} VERSION=${VERSION} bash -s" <<'REMOTE'
 set -eu
 NETWORK=portfolio_default
 if ! podman network exists "$NETWORK" 2>/dev/null; then
@@ -169,15 +170,46 @@ if ! podman network exists "$NETWORK" 2>/dev/null; then
   echo "Network $NETWORK created."
 fi
 
-# Connect existing shared postgres and minio containers to portfolio network
-podman network connect "$NETWORK" postgres 2>/dev/null || true
-podman network connect "$NETWORK" minio 2>/dev/null || true
+connect_shared_container() {
+  container=$1
+  alias=$2
+  if ! podman container exists "$container"; then
+    echo "Required shared container '$container' is not running or does not exist." >&2
+    exit 1
+  fi
 
-# Ensure database 'portfolio' exists in postgres
-podman exec postgres psql -U postgres -tc "SELECT 1 FROM pg_database WHERE datname = 'portfolio'" | grep -q 1 || \
-  podman exec postgres psql -U postgres -c "CREATE DATABASE portfolio;"
+  networks=$(podman inspect "$container" --format '{{json .NetworkSettings.Networks}}')
+  if printf '%s' "$networks" | grep -q "\"$NETWORK\":"; then
+    echo "Shared container '$container' is already connected to $NETWORK."
+  else
+    podman network connect --alias "$alias" "$NETWORK" "$container"
+    echo "Connected shared container '$container' to $NETWORK as '$alias'."
+  fi
+}
 
-echo "Network $NETWORK is valid and connected to shared postgres & minio."
+connect_shared_container postgres postgres
+connect_shared_container minio minio
+
+for attempt in $(seq 1 30); do
+  if podman exec postgres pg_isready -U postgres -d postgres >/dev/null 2>&1; then
+    break
+  fi
+  echo "Waiting for shared PostgreSQL (attempt $attempt/30)..."
+  sleep 2
+done
+
+if ! podman exec postgres pg_isready -U postgres -d postgres >/dev/null 2>&1; then
+  echo "Shared PostgreSQL did not become ready." >&2
+  podman logs --tail 50 postgres 2>/dev/null || true
+  exit 1
+fi
+
+if ! podman exec postgres psql -U postgres -d postgres -tAc \
+  "SELECT 1 FROM pg_database WHERE datname = 'portfolio'" | grep -qx 1; then
+  podman exec postgres psql -U postgres -d postgres -c "CREATE DATABASE portfolio;"
+fi
+
+echo "Shared PostgreSQL is ready and database 'portfolio' exists."
 REMOTE
           '''
         }
