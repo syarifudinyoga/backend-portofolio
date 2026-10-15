@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"portfolio/backend/migrations"
 )
@@ -233,6 +235,10 @@ func databaseURL() string {
 	}
 	query := connectionURL.Query()
 	query.Set("sslmode", envOr("POSTGRES_SSLMODE", "disable"))
+	query.Set("keepalives", "1")
+	query.Set("keepalives_idle", "30")
+	query.Set("keepalives_interval", "10")
+	query.Set("keepalives_count", "3")
 	connectionURL.RawQuery = query.Encode()
 	return connectionURL.String()
 }
@@ -243,9 +249,18 @@ func connectDatabase(ctx context.Context, logger *log.Logger, connectionURL stri
 		logger.Printf("database: invalid connection configuration: %v", err)
 		return nil, err
 	}
-	config.MaxConns = 10
-	config.MinConns = 1
-	config.MaxConnLifetime = 30 * time.Minute
+	config.MaxConns = 15
+	config.MinConns = 2
+	config.MaxConnIdleTime = 5 * time.Minute
+	config.MaxConnLifetime = 1 * time.Hour
+	config.HealthCheckPeriod = 30 * time.Second
+
+	// Validasi koneksi sebelum dipakai query untuk mencegah error koneksi mati (stale / broken connection)
+	config.BeforeAcquire = func(ctx context.Context, conn *pgx.Conn) bool {
+		pingCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		defer cancel()
+		return conn.Ping(pingCtx) == nil
+	}
 
 	logger.Printf("database: connecting host=%s port=%d database=%s user=%s",
 		config.ConnConfig.Host, config.ConnConfig.Port, config.ConnConfig.Database, config.ConnConfig.User)
@@ -266,18 +281,45 @@ func connectDatabase(ctx context.Context, logger *log.Logger, connectionURL stri
 
 func loadPortfolio(ctx context.Context, db *pgxpool.Pool) (portfolio, error) {
 	var result portfolio
-	if err := db.QueryRow(ctx, `SELECT name, role, headline, about, location, email, website, avatar_url, resume_url, github_url, instagram_url, twitter_url, linkedin_url, ui_texts FROM profile WHERE id = 1`).
+	if err := db.QueryRow(ctx, `SELECT 
+		COALESCE(name, ''),
+		COALESCE(role, ''),
+		COALESCE(headline, ''),
+		COALESCE(about, ''),
+		COALESCE(location, ''),
+		COALESCE(email, ''),
+		COALESCE(website, ''),
+		COALESCE(avatar_url, ''),
+		COALESCE(resume_url, ''),
+		COALESCE(github_url, ''),
+		COALESCE(instagram_url, ''),
+		COALESCE(twitter_url, ''),
+		COALESCE(linkedin_url, ''),
+		COALESCE(ui_texts, '{}'::jsonb)
+		FROM profile WHERE id = 1`).
 		Scan(&result.Profile.Name, &result.Profile.Role, &result.Profile.Headline, &result.Profile.About,
 			&result.Profile.Location, &result.Profile.Email, &result.Profile.Website,
 			&result.Profile.AvatarURL, &result.Profile.ResumeURL, &result.Profile.GithubURL,
 			&result.Profile.InstagramURL, &result.Profile.TwitterURL, &result.Profile.LinkedinURL, &result.Texts); err != nil {
-		return portfolio{}, err
+		if errors.Is(err, pgx.ErrNoRows) {
+			result.Profile = profile{
+				Name: "Nama Anda",
+				Role: "Full-stack Developer",
+			}
+			result.Texts = make(map[string]string)
+		} else {
+			return portfolio{}, fmt.Errorf("query profile: %w", err)
+		}
 	}
+	if result.Texts == nil {
+		result.Texts = make(map[string]string)
+	}
+
 	result.Experiences = []experience{}
-	rows, err := db.Query(ctx, `SELECT id, company, role, location, start_date::text, end_date::text, description, highlights
+	rows, err := db.Query(ctx, `SELECT id, company, role, location, start_date::text, end_date::text, description, COALESCE(highlights, '{}')
 		FROM experiences ORDER BY start_date DESC, id DESC`)
 	if err != nil {
-		return portfolio{}, err
+		return portfolio{}, fmt.Errorf("query experiences: %w", err)
 	}
 	for rows.Next() {
 		var item experience
@@ -285,14 +327,14 @@ func loadPortfolio(ctx context.Context, db *pgxpool.Pool) (portfolio, error) {
 		if err := rows.Scan(&item.ID, &item.Company, &item.Role, &item.Location, &item.StartDate,
 			&endDate, &item.Description, &item.Highlights); err != nil {
 			rows.Close()
-			return portfolio{}, err
+			return portfolio{}, fmt.Errorf("scan experience: %w", err)
 		}
 		item.EndDate = endDate
 		result.Experiences = append(result.Experiences, item)
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
-		return portfolio{}, err
+		return portfolio{}, fmt.Errorf("iterate experiences: %w", err)
 	}
 	rows.Close()
 
@@ -300,20 +342,20 @@ func loadPortfolio(ctx context.Context, db *pgxpool.Pool) (portfolio, error) {
 	rows, err = db.Query(ctx, `SELECT id, institution, degree, field, start_date::text, end_date::text, description
 		FROM education ORDER BY start_date DESC, id DESC`)
 	if err != nil {
-		return portfolio{}, err
+		return portfolio{}, fmt.Errorf("query education: %w", err)
 	}
 	for rows.Next() {
 		var item education
 		if err := rows.Scan(&item.ID, &item.Institution, &item.Degree, &item.Field,
 			&item.StartDate, &item.EndDate, &item.Description); err != nil {
 			rows.Close()
-			return portfolio{}, err
+			return portfolio{}, fmt.Errorf("scan education: %w", err)
 		}
 		result.Education = append(result.Education, item)
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
-		return portfolio{}, err
+		return portfolio{}, fmt.Errorf("iterate education: %w", err)
 	}
 	rows.Close()
 
@@ -321,78 +363,78 @@ func loadPortfolio(ctx context.Context, db *pgxpool.Pool) (portfolio, error) {
 	rows, err = db.Query(ctx, `SELECT id, name, issuer, issued_date::text, credential_url
 		FROM certifications ORDER BY issued_date DESC NULLS LAST, sort_order, id`)
 	if err != nil {
-		return portfolio{}, err
+		return portfolio{}, fmt.Errorf("query certifications: %w", err)
 	}
 	for rows.Next() {
 		var item certification
 		if err := rows.Scan(&item.ID, &item.Name, &item.Issuer, &item.IssuedDate, &item.CredentialURL); err != nil {
 			rows.Close()
-			return portfolio{}, err
+			return portfolio{}, fmt.Errorf("scan certification: %w", err)
 		}
 		result.Certifications = append(result.Certifications, item)
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
-		return portfolio{}, err
+		return portfolio{}, fmt.Errorf("iterate certifications: %w", err)
 	}
 	rows.Close()
 
 	result.Skills = []skill{}
 	rows, err = db.Query(ctx, `SELECT id, name, category, level FROM skills ORDER BY category, sort_order, name`)
 	if err != nil {
-		return portfolio{}, err
+		return portfolio{}, fmt.Errorf("query skills: %w", err)
 	}
 	for rows.Next() {
 		var item skill
 		if err := rows.Scan(&item.ID, &item.Name, &item.Category, &item.Level); err != nil {
 			rows.Close()
-			return portfolio{}, err
+			return portfolio{}, fmt.Errorf("scan skill: %w", err)
 		}
 		result.Skills = append(result.Skills, item)
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
-		return portfolio{}, err
+		return portfolio{}, fmt.Errorf("iterate skills: %w", err)
 	}
 	rows.Close()
 
 	result.TechStack = []tech{}
 	rows, err = db.Query(ctx, `SELECT id, name, category FROM tech_stack ORDER BY category, sort_order, name`)
 	if err != nil {
-		return portfolio{}, err
+		return portfolio{}, fmt.Errorf("query tech_stack: %w", err)
 	}
 	for rows.Next() {
 		var item tech
 		if err := rows.Scan(&item.ID, &item.Name, &item.Category); err != nil {
 			rows.Close()
-			return portfolio{}, err
+			return portfolio{}, fmt.Errorf("scan tech_stack: %w", err)
 		}
 		result.TechStack = append(result.TechStack, item)
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
-		return portfolio{}, err
+		return portfolio{}, fmt.Errorf("iterate tech_stack: %w", err)
 	}
 	rows.Close()
 
 	result.Projects = []project{}
-	rows, err = db.Query(ctx, `SELECT id, title, category, COALESCE(project_type, 'work'), description, year, image_url, video_url, live_url, repo_url, tech
+	rows, err = db.Query(ctx, `SELECT id, title, category, COALESCE(project_type, 'work'), description, year, image_url, video_url, live_url, repo_url, COALESCE(tech, '{}')
 		FROM projects ORDER BY year DESC, id DESC`)
 	if err != nil {
-		return portfolio{}, err
+		return portfolio{}, fmt.Errorf("query projects: %w", err)
 	}
 	for rows.Next() {
 		var item project
 		if err := rows.Scan(&item.ID, &item.Title, &item.Category, &item.ProjectType, &item.Description,
 			&item.Year, &item.ImageURL, &item.VideoURL, &item.LiveURL, &item.RepoURL, &item.Tech); err != nil {
 			rows.Close()
-			return portfolio{}, err
+			return portfolio{}, fmt.Errorf("scan project: %w", err)
 		}
 		result.Projects = append(result.Projects, item)
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
-		return portfolio{}, err
+		return portfolio{}, fmt.Errorf("iterate projects: %w", err)
 	}
 	rows.Close()
 	return result, nil
