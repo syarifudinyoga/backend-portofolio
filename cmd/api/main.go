@@ -235,10 +235,6 @@ func databaseURL() string {
 	}
 	query := connectionURL.Query()
 	query.Set("sslmode", envOr("POSTGRES_SSLMODE", "disable"))
-	query.Set("keepalives", "1")
-	query.Set("keepalives_idle", "30")
-	query.Set("keepalives_interval", "10")
-	query.Set("keepalives_count", "3")
 	connectionURL.RawQuery = query.Encode()
 	return connectionURL.String()
 }
@@ -254,6 +250,13 @@ func connectDatabase(ctx context.Context, logger *log.Logger, connectionURL stri
 	config.MaxConnIdleTime = 5 * time.Minute
 	config.MaxConnLifetime = 1 * time.Hour
 	config.HealthCheckPeriod = 30 * time.Second
+
+	// Set TCP KeepAlive pada level socket OS
+	dialer := &net.Dialer{
+		KeepAlive: 30 * time.Second,
+		Timeout:   5 * time.Second,
+	}
+	config.ConnConfig.DialFunc = dialer.DialContext
 
 	// Validasi koneksi sebelum dipakai query untuk mencegah error koneksi mati (stale / broken connection)
 	config.BeforeAcquire = func(ctx context.Context, conn *pgx.Conn) bool {
