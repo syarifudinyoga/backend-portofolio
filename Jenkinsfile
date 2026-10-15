@@ -178,12 +178,17 @@ connect_shared_container() {
     exit 1
   fi
 
-  networks=$(podman inspect "$container" --format '{{json .NetworkSettings.Networks}}')
-  if printf '%s' "$networks" | grep -q "\"$NETWORK\":"; then
+  if podman inspect "$container" --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' 2>/dev/null | grep -qw "$NETWORK"; then
     echo "Shared container '$container' is already connected to $NETWORK."
   else
-    podman network connect --alias "$alias" "$NETWORK" "$container"
-    echo "Connected shared container '$container' to $NETWORK as '$alias'."
+    if out=$(podman network connect --alias "$alias" "$NETWORK" "$container" 2>&1); then
+      echo "Connected shared container '$container' to $NETWORK as '$alias'."
+    elif echo "$out" | grep -qi "already connected"; then
+      echo "Shared container '$container' is already connected to $NETWORK."
+    else
+      echo "Failed to connect '$container' to $NETWORK: $out" >&2
+      exit 1
+    fi
   fi
 }
 
