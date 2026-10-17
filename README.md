@@ -77,7 +77,7 @@ Database lama yang sudah punya schema dari `001_initial.sql` juga dapat diadopsi
 
 API sengaja read-only; endpoint admin tidak diekspos. Perbarui konten melalui SQL/migration. Untuk development lokal, frontend mengakses API Go melalui proxy Vite yang ditentukan di `frontend/.env`.
 
-Saat start, terminal Go mencetak status koneksi database (`connecting`, `connected successfully`, atau `connection failed` beserta error PostgreSQL). Bila koneksi gagal, API langsung berhenti dengan exit code non-zero; periksa host, port, database, user, password, dan status layanan PostgreSQL. Saat berhasil, log juga menyebut HTTP address yang sedang dipakai.
+Saat start, terminal Go mencetak status koneksi database (`connecting`, `connected successfully`, atau `connection failed` beserta error PostgreSQL). Jika database belum tersedia, backend mencoba lagi otomatis dengan jeda 1, 2, 4, 8, 16, lalu maksimal 30 detik sampai koneksi berhasil atau proses menerima sinyal berhenti. Saat API berjalan, `pgxpool` membuang koneksi yang putus dan membuat koneksi pengganti untuk operasi berikutnya. Request yang sedang berlangsung saat koneksi terputus tetap dapat gagal; klien dapat mencoba ulang request tersebut. Periksa host, port, database, user, password, dan status layanan PostgreSQL jika masalah berlanjut. Saat berhasil, log juga menyebut HTTP address yang sedang dipakai.
 
 ## Upload gambar ke MinIO
 

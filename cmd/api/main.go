@@ -112,6 +112,9 @@ func main() {
 
 	pool, err := connectDatabase(ctx, logger, databaseURL())
 	if err != nil {
+		if ctx.Err() != nil {
+			return
+		}
 		logger.Fatalf("startup aborted: database connection failed: %v", err)
 	}
 	defer pool.Close()
@@ -267,19 +270,47 @@ func connectDatabase(ctx context.Context, logger *log.Logger, connectionURL stri
 
 	logger.Printf("database: connecting host=%s port=%d database=%s user=%s",
 		config.ConnConfig.Host, config.ConnConfig.Port, config.ConnConfig.Database, config.ConnConfig.User)
-	pool, err := pgxpool.NewWithConfig(ctx, config)
-	if err != nil {
-		logger.Printf("database: connection failed: %v", err)
-		return nil, err
+	for attempt := 1; ; attempt++ {
+		pool, err := pgxpool.NewWithConfig(ctx, config)
+		if err == nil {
+			pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			err = pool.Ping(pingCtx)
+			cancel()
+			if err == nil {
+				return pool, nil
+			}
+			pool.Close()
+		}
+
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		delay := databaseRetryDelay(attempt)
+		logger.Printf("database: connection failed (attempt %d): %v; retrying in %s", attempt, err, delay)
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
 	}
-	pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	if err := pool.Ping(pingCtx); err != nil {
-		pool.Close()
-		logger.Printf("database: connection failed: %v", err)
-		return nil, err
+}
+
+func databaseRetryDelay(attempt int) time.Duration {
+	switch {
+	case attempt <= 1:
+		return time.Second
+	case attempt >= 6:
+		return 30 * time.Second
+	default:
+		return time.Second * time.Duration(1<<(attempt-1))
 	}
-	return pool, nil
 }
 
 func loadPortfolio(ctx context.Context, db *pgxpool.Pool) (portfolio, error) {

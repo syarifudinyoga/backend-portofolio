@@ -2,6 +2,7 @@ package main
 
 import (
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -33,5 +34,27 @@ func TestDatabaseURLUsesEncodedCredentials(t *testing.T) {
 	}
 	if config.ConnConfig.TLSConfig == nil {
 		t.Fatal("TLSConfig is nil, want TLS enabled for sslmode=require")
+	}
+}
+
+func TestDatabaseRetryDelay(t *testing.T) {
+	tests := []struct {
+		attempt int
+		want    time.Duration
+	}{
+		{attempt: 0, want: time.Second},
+		{attempt: 1, want: time.Second},
+		{attempt: 2, want: 2 * time.Second},
+		{attempt: 3, want: 4 * time.Second},
+		{attempt: 4, want: 8 * time.Second},
+		{attempt: 5, want: 16 * time.Second},
+		{attempt: 6, want: 30 * time.Second},
+		{attempt: 20, want: 30 * time.Second},
+	}
+
+	for _, test := range tests {
+		if got := databaseRetryDelay(test.attempt); got != test.want {
+			t.Errorf("databaseRetryDelay(%d) = %s, want %s", test.attempt, got, test.want)
+		}
 	}
 }
