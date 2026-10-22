@@ -82,6 +82,28 @@ pipeline {
             echo "Checking existing PostgreSQL container on Homeserver..."
             ssh -i "${SSH_KEY}" ${SSH_OPTS} ${SERVER_USER}@${SERVER_HOST} "bash -s" <<'REMOTE'
 set -e
+NETWORK=portfolio_default
+if ! podman network exists "$NETWORK" 2>/dev/null; then
+  podman network create "$NETWORK" >/dev/null
+  echo "Network $NETWORK created."
+fi
+
+connect_container() {
+  c=$1
+  alias=$2
+  if podman container exists "$c" 2>/dev/null; then
+    if podman inspect "$c" --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' 2>/dev/null | grep -qw "$NETWORK"; then
+      echo "Container '$c' is already connected to $NETWORK."
+    else
+      podman network connect --alias "$alias" "$NETWORK" "$c" 2>/dev/null || true
+      echo "Connected container '$c' to $NETWORK as '$alias'."
+    fi
+  fi
+}
+
+connect_container postgres postgres
+connect_container minio minio
+
 if podman container exists postgres 2>/dev/null; then
   echo "Existing PostgreSQL container detected."
   if ! podman ps --filter name=postgres --format '{{.Names}}' | grep -qw postgres; then
@@ -256,7 +278,9 @@ echo "Launching new container instance..."
 podman run -d \
   --name "${CONTAINER_NAME}" \
   --restart always \
-  --network host \
+  --network portfolio_default \
+  -p "${APP_PORT}:${APP_PORT}" \
+  --add-host host.containers.internal:host-gateway \
   --env-file "${DEPLOY_DIR}/.env" \
   -e PORT="${APP_PORT}" \
   "${IMAGE_NAME}:latest"
