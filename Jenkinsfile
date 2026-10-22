@@ -80,34 +80,35 @@ pipeline {
         withCredentials([sshUserPrivateKey(credentialsId: env.SSH_CREDENTIAL, keyFileVariable: 'SSH_KEY')]) {
           sh '''
             echo "Checking existing PostgreSQL container on Homeserver..."
-            ssh -i "${SSH_KEY}" ${SSH_OPTS} ${SERVER_USER}@${SERVER_HOST} "
-              if podman container exists postgres 2>/dev/null; then
-                echo 'Existing PostgreSQL container detected.'
-                if ! podman ps --filter name=postgres --format '{{.Names}}' | grep -qw postgres; then
-                  echo 'Starting existing PostgreSQL container...'
-                  podman start postgres
-                fi
-              else
-                echo 'Notice: PostgreSQL container \"postgres\" not registered in podman, checking port 5432 directly...'
-              fi
+            ssh -i "${SSH_KEY}" ${SSH_OPTS} ${SERVER_USER}@${SERVER_HOST} "bash -s" <<'REMOTE'
+set -e
+if podman container exists postgres 2>/dev/null; then
+  echo "Existing PostgreSQL container detected."
+  if ! podman ps --filter name=postgres --format '{{.Names}}' | grep -qw postgres; then
+    echo "Starting existing PostgreSQL container..."
+    podman start postgres
+  fi
+else
+  echo "Notice: PostgreSQL container 'postgres' not registered in podman, checking port 5432 directly..."
+fi
 
-              for i in \$(seq 1 30); do
-                if podman exec postgres pg_isready -U postgres >/dev/null 2>&1 || nc -z 127.0.0.1 5432 >/dev/null 2>&1; then
-                  echo 'Existing PostgreSQL is ready and accepting connections!'
-                  break
-                fi
-                echo \"Waiting for PostgreSQL readiness... (\$i/30)\"
-                sleep 2
-              done
+for i in $(seq 1 30); do
+  if podman exec postgres pg_isready -U postgres >/dev/null 2>&1 || nc -z 127.0.0.1 5432 >/dev/null 2>&1; then
+    echo "Existing PostgreSQL is ready and accepting connections!"
+    break
+  fi
+  echo "Waiting for PostgreSQL readiness... ($i/30)"
+  sleep 2
+done
 
-              if podman container exists postgres 2>/dev/null; then
-                if ! podman exec postgres psql -U postgres -tAc \"SELECT 1 FROM pg_database WHERE datname = 'portfolio'\" 2>/dev/null | grep -qx 1; then
-                  echo \"Creating database 'portfolio' on existing PostgreSQL...\"
-                  podman exec postgres psql -U postgres -c \"CREATE DATABASE portfolio;\" || true
-                fi
-                echo \"Database 'portfolio' ready on existing PostgreSQL container.\"
-              fi
-            "
+if podman container exists postgres 2>/dev/null; then
+  if ! podman exec postgres psql -U postgres -tAc "SELECT 1 FROM pg_database WHERE datname = 'portfolio'" 2>/dev/null | grep -qx 1; then
+    echo "Creating database 'portfolio' on existing PostgreSQL..."
+    podman exec postgres psql -U postgres -c "CREATE DATABASE portfolio;" || true
+  fi
+  echo "Database 'portfolio' ready on existing PostgreSQL container."
+fi
+REMOTE
           '''
         }
       }
@@ -140,20 +141,22 @@ pipeline {
         withCredentials([sshUserPrivateKey(credentialsId: env.SSH_CREDENTIAL, keyFileVariable: 'SSH_KEY')]) {
           sh '''
             echo "Running Unit Tests & generating coverage on Homeserver..."
-            ssh -i "${SSH_KEY}" ${SSH_OPTS} ${SERVER_USER}@${SERVER_HOST} "
-              cd ${DEPLOY_DIR}
-              podman run --rm \
-                -v ${DEPLOY_DIR}:/app:Z \
-                -w /app \
-                docker.io/library/golang:alpine \
-                sh -c 'go test -v -coverprofile=coverage.out ./...'
-            "
+            ssh -i "${SSH_KEY}" ${SSH_OPTS} ${SERVER_USER}@${SERVER_HOST} \
+              "DEPLOY_DIR='${DEPLOY_DIR}' bash -s" <<'REMOTE'
+set -e
+cd "${DEPLOY_DIR}"
+podman run --rm \
+  -v "${DEPLOY_DIR}:/app:Z" \
+  -w /app \
+  docker.io/library/golang:alpine \
+  sh -c 'go test -v -coverprofile=coverage.out ./...'
+REMOTE
 
             echo "Retrieving coverage.out back to Jenkins workspace..."
             ssh -i "${SSH_KEY}" ${SSH_OPTS} ${SERVER_USER}@${SERVER_HOST} "cat ${DEPLOY_DIR}/coverage.out 2>/dev/null" > coverage.out || true
 
             if [ -s coverage.out ]; then
-              echo "coverage.out successfully fetched (\$(wc -l < coverage.out) lines)."
+              echo "coverage.out successfully fetched ($(wc -l < coverage.out) lines)."
             else
               echo "WARNING: coverage.out is empty or not found."
             fi
@@ -174,19 +177,21 @@ pipeline {
           sh '''
             set +x
             echo "Executing SonarScanner on Homeserver via Podman..."
-            ssh -i "${SSH_KEY}" ${SSH_OPTS} ${SERVER_USER}@${SERVER_HOST} "
-              cd ${DEPLOY_DIR}
-              podman run --rm \
-                --network host \
-                -v ${DEPLOY_DIR}:/usr/src:Z \
-                -w /usr/src \
-                docker.io/sonarsource/sonar-scanner-cli \
-                sonar-scanner \
-                -Dsonar.token='${SONAR_TOKEN}' \
-                -Dsonar.host.url='${SONAR_HOST_URL}' \
-                -Dsonar.ws.timeout=300 \
-                -Dsonar.working.directory=/usr/src/.scannerwork
-            "
+            ssh -i "${SSH_KEY}" ${SSH_OPTS} ${SERVER_USER}@${SERVER_HOST} \
+              "DEPLOY_DIR='${DEPLOY_DIR}' SONAR_TOKEN='${SONAR_TOKEN}' SONAR_HOST_URL='${SONAR_HOST_URL}' bash -s" <<'REMOTE'
+set -e
+cd "${DEPLOY_DIR}"
+podman run --rm \
+  --network host \
+  -v "${DEPLOY_DIR}:/usr/src:Z" \
+  -w /usr/src \
+  docker.io/sonarsource/sonar-scanner-cli \
+  sonar-scanner \
+  -Dsonar.token="${SONAR_TOKEN}" \
+  -Dsonar.host.url="${SONAR_HOST_URL}" \
+  -Dsonar.ws.timeout=300 \
+  -Dsonar.working.directory=/usr/src/.scannerwork
+REMOTE
 
             echo "Pulling .scannerwork report back to Jenkins workspace for UI integration..."
             ssh -i "${SSH_KEY}" ${SSH_OPTS} ${SERVER_USER}@${SERVER_HOST} "tar -czf - -C ${DEPLOY_DIR} .scannerwork 2>/dev/null" | tar -xzf - 2>/dev/null || true
@@ -224,10 +229,8 @@ pipeline {
         withCredentials([sshUserPrivateKey(credentialsId: env.SSH_CREDENTIAL, keyFileVariable: 'SSH_KEY')]) {
           sh '''
             echo "Building Podman container image on Homeserver..."
-            ssh -i "${SSH_KEY}" ${SSH_OPTS} ${SERVER_USER}@${SERVER_HOST} "
-              cd ${DEPLOY_DIR}
-              podman build -t ${IMAGE_NAME}:latest -f Dockerfile .
-            "
+            ssh -i "${SSH_KEY}" ${SSH_OPTS} ${SERVER_USER}@${SERVER_HOST} \
+              "cd ${DEPLOY_DIR} && podman build -t ${IMAGE_NAME}:latest -f Dockerfile ."
             echo "Container image ${IMAGE_NAME}:latest successfully built."
           '''
         }
@@ -239,23 +242,25 @@ pipeline {
         withCredentials([sshUserPrivateKey(credentialsId: env.SSH_CREDENTIAL, keyFileVariable: 'SSH_KEY')]) {
           sh '''
             echo "Starting container ${CONTAINER_NAME} on Homeserver..."
-            ssh -i "${SSH_KEY}" ${SSH_OPTS} ${SERVER_USER}@${SERVER_HOST} "
-              echo 'Stopping existing container if running...'
-              podman stop ${CONTAINER_NAME} 2>/dev/null || true
-              podman rm -f ${CONTAINER_NAME} 2>/dev/null || true
+            ssh -i "${SSH_KEY}" ${SSH_OPTS} ${SERVER_USER}@${SERVER_HOST} \
+              "DEPLOY_DIR='${DEPLOY_DIR}' CONTAINER_NAME='${CONTAINER_NAME}' IMAGE_NAME='${IMAGE_NAME}' APP_PORT='${APP_PORT}' bash -s" <<'REMOTE'
+set -e
+echo "Stopping existing container if running..."
+podman stop "${CONTAINER_NAME}" 2>/dev/null || true
+podman rm -f "${CONTAINER_NAME}" 2>/dev/null || true
 
-              echo 'Launching new container instance...'
-              podman run -d \
-                --name ${CONTAINER_NAME} \
-                --restart always \
-                --network host \
-                --env-file ${DEPLOY_DIR}/.env \
-                -e PORT='${APP_PORT}' \
-                ${IMAGE_NAME}:latest
+echo "Launching new container instance..."
+podman run -d \
+  --name "${CONTAINER_NAME}" \
+  --restart always \
+  --network host \
+  --env-file "${DEPLOY_DIR}/.env" \
+  -e PORT="${APP_PORT}" \
+  "${IMAGE_NAME}:latest"
 
-              echo 'Container launched successfully.'
-              podman ps --filter name=${CONTAINER_NAME}
-            "
+echo "Container launched successfully."
+podman ps --filter "name=${CONTAINER_NAME}"
+REMOTE
           '''
         }
       }
@@ -266,27 +271,28 @@ pipeline {
         withCredentials([sshUserPrivateKey(credentialsId: env.SSH_CREDENTIAL, keyFileVariable: 'SSH_KEY')]) {
           sh '''
             echo "Validating application health endpoint http://127.0.0.1:${APP_PORT}${HEALTH_ENDPOINT}..."
-            ssh -i "${SSH_KEY}" ${SSH_OPTS} ${SERVER_USER}@${SERVER_HOST} "
-              HEALTH_URL='http://127.0.0.1:${APP_PORT}${HEALTH_ENDPOINT}'
-              SUCCESS=0
-              for i in \$(seq 1 30); do
-                HTTP_CODE=\$(curl -s -o /dev/null -w '%{http_code}' \$HEALTH_URL || echo '000')
-                if [ \"\$HTTP_CODE\" = '200' ] || [ \"\$HTTP_CODE\" = '204' ]; then
-                  echo \"Application is healthy! (HTTP \$HTTP_CODE) [Attempt \$i/30]\"
-                  SUCCESS=1
-                  break
-                fi
-                echo \"Waiting for application to become healthy... (HTTP \$HTTP_CODE) [Attempt \$i/30]\"
-                sleep 2
-              done
+            ssh -i "${SSH_KEY}" ${SSH_OPTS} ${SERVER_USER}@${SERVER_HOST} \
+              "APP_PORT='${APP_PORT}' HEALTH_ENDPOINT='${HEALTH_ENDPOINT}' CONTAINER_NAME='${CONTAINER_NAME}' bash -s" <<'REMOTE'
+HEALTH_URL="http://127.0.0.1:${APP_PORT}${HEALTH_ENDPOINT}"
+SUCCESS=0
+for i in $(seq 1 30); do
+  HTTP_CODE=$(curl -s -o /dev/null -w '%{http_code}' "$HEALTH_URL" || echo "000")
+  if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "204" ]; then
+    echo "Application is healthy! (HTTP $HTTP_CODE) [Attempt $i/30]"
+    SUCCESS=1
+    break
+  fi
+  echo "Waiting for application to become healthy... (HTTP $HTTP_CODE) [Attempt $i/30]"
+  sleep 2
+done
 
-              if [ \$SUCCESS -ne 1 ]; then
-                echo \"Health check failed after 30 attempts!\" >&2
-                echo \"=== Last 50 Container Logs ===\" >&2
-                podman logs --tail 50 ${CONTAINER_NAME} >&2
-                exit 1
-              fi
-            "
+if [ "$SUCCESS" -ne 1 ]; then
+  echo "Health check failed after 30 attempts!" >&2
+  echo "=== Last 50 Container Logs ===" >&2
+  podman logs --tail 50 "${CONTAINER_NAME}" >&2
+  exit 1
+fi
+REMOTE
           '''
         }
       }
