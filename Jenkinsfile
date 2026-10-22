@@ -8,49 +8,57 @@ pipeline {
 
   parameters {
     string(
-      name: 'VERSION',
-      defaultValue: '1.0.0',
-      description: 'Image tag version (e.g. 1.0.0, 1.0.1, 2.0.0, etc.)',
+      name: 'BRANCH',
+      defaultValue: 'devlabhub',
+      description: 'Git branch to deploy',
       trim: true
     )
-    string(
-      name: 'GHCR_NAMESPACE',
-      defaultValue: 'syarifudinyoga',
-      description: 'Lowercase GitHub user or organization that owns the GHCR package',
-      trim: true
+    booleanParam(
+      name: 'RUN_TESTS',
+      defaultValue: true,
+      description: 'Run Go Unit Test & Coverage on Homeserver'
+    )
+    booleanParam(
+      name: 'RUN_SONAR',
+      defaultValue: true,
+      description: 'Run SonarQube Scanner'
     )
   }
 
   environment {
-    VPS_HOST = '100.87.90.67'
-    VPS_USER = 'devlabhub'
-    VPS_DIR  = '/home/devlabhub/portfolio-backend'
-    GIT_REPO = 'https://github.com/syarifudinyoga/backend-portofolio.git'
+    // ==========================================
+    // Homeserver Target Infrastructure
+    // ==========================================
+    SERVER_HOST      = '100.87.90.67'
+    SERVER_USER      = 'devlabhub'
+    SSH_USER         = 'devlabhub'
+    SSH_CREDENTIAL   = 'homeserver-ssh'
+    SSH_OPTS         = '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
 
-    SSH_CREDENTIAL  = 'biznet-vps'
-    ENV_CREDENTIAL  = 'portfolio-backend-env'
-    GHCR_CREDENTIAL = 'ghcr-write'
+    // ==========================================
+    // Application & Deployment Configuration
+    // ==========================================
+    APP_NAME         = 'portfolio-backend'
+    CONTAINER_NAME   = 'portfolio-backend'
+    IMAGE_NAME       = 'portfolio-backend'
+    DEPLOY_DIR       = '/home/devlabhub/projects/portfolio-backend'
+    APP_PORT         = '3004'
+    HEALTH_ENDPOINT  = '/api/health'
 
-    PODMAN         = 'podman'
-    PODMAN_COMPOSE = '~/.local/bin/podman-compose'
-    BACKEND_IMAGE  = 'portfolio-backend'
-    BUILDX_BUILDER = 'portfolio-backend-builder'
+    // ==========================================
+    // Secrets & SonarQube Configuration
+    // ==========================================
+    ENV_CREDENTIAL   = 'portfolio-backend-env'
+    SONAR_CREDENTIAL = 'sonar-devlabhub'
+    SONAR_HOST_URL   = 'http://127.0.0.1:9002'
+
+    // Mapping params to environment to avoid shell bad substitution
+    OPT_BRANCH       = "${params.BRANCH}"
+    OPT_RUN_TESTS    = "${params.RUN_TESTS}"
+    OPT_RUN_SONAR    = "${params.RUN_SONAR}"
   }
 
   stages {
-
-    stage('Validate Inputs') {
-      steps {
-        script {
-          if (!(params.VERSION ==~ /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/)) {
-            error('VERSION must be a safe container image tag.')
-          }
-          if (!(params.GHCR_NAMESPACE ==~ /^[a-z0-9][a-z0-9-]{0,38}$/)) {
-            error('GHCR_NAMESPACE must be a lowercase GitHub user or organization name.')
-          }
-        }
-      }
-    }
 
     stage('Checkout SCM') {
       steps {
@@ -58,211 +66,163 @@ pipeline {
       }
     }
 
-    stage('Build and Push Image to GHCR') {
-      steps {
-        withCredentials([
-          usernamePassword(
-            credentialsId: env.GHCR_CREDENTIAL,
-            usernameVariable: 'GHCR_USER',
-            passwordVariable: 'GHCR_TOKEN'
-          )
-        ]) {
-          sh '''
-            set +x
-            export PATH="/Applications/Docker.app/Contents/Resources/bin:$PATH"
-            printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GHCR_USER" --password-stdin
-            trap 'docker logout ghcr.io >/dev/null 2>&1 || true' EXIT
-
-            docker buildx inspect "$BUILDX_BUILDER" >/dev/null 2>&1 || \
-              docker buildx create --name "$BUILDX_BUILDER" --driver docker-container
-            docker buildx inspect "$BUILDX_BUILDER" --bootstrap
-
-            docker buildx build \
-              --builder "$BUILDX_BUILDER" \
-              --platform linux/amd64,linux/arm64 \
-              --push \
-              --tag "ghcr.io/${GHCR_NAMESPACE}/${BACKEND_IMAGE}:${VERSION}" \
-              --file Containerfile \
-              .
-          '''
-        }
-      }
-    }
-
     stage('Test Homeserver Connection') {
       steps {
         sshagent([env.SSH_CREDENTIAL]) {
           sh '''
-            echo "Testing SSH connection to homeserver ${VPS_HOST}..."
-            ssh -o StrictHostKeyChecking=yes \
-              ${VPS_USER}@${VPS_HOST} \
-              "echo '=== Homeserver Info ===' && hostname && whoami && \
-               echo '=== Podman Version ===' && ${PODMAN} --version && \
-               echo '=== Podman Compose Version ===' && ${PODMAN_COMPOSE} version"
+            echo "Checking SSH connection to ${SERVER_USER}@${SERVER_HOST}..."
+            ssh ${SSH_OPTS} ${SERVER_USER}@${SERVER_HOST} "
+              echo '=== Homeserver Host Info ==='
+              hostname && whoami
+              echo '=== Podman Info ==='
+              podman --version
+            "
           '''
         }
       }
     }
 
-    stage('Sync Git on Homeserver') {
+    stage('Sync Code to Homeserver') {
       steps {
         sshagent([env.SSH_CREDENTIAL]) {
           sh '''
-            ssh -o StrictHostKeyChecking=yes ${VPS_USER}@${VPS_HOST} "bash -s" <<REMOTE
-set -eu
-if [ ! -d "${VPS_DIR}/.git" ]; then
-  echo "Cloning repository on homeserver..."
-  mkdir -p "\$(dirname "${VPS_DIR}")"
-  git clone "${GIT_REPO}" "${VPS_DIR}"
-  cd "${VPS_DIR}"
-else
-  echo "Pulling latest changes from Git on homeserver..."
-  cd "${VPS_DIR}"
-  git fetch origin
-  git reset --hard origin/main || git pull origin main
-fi
-echo "Git workspace synced: \$(git rev-parse --short HEAD)"
-REMOTE
+            echo "Syncing code to ${SERVER_HOST}:${DEPLOY_DIR} via tar stream..."
+            ssh ${SSH_OPTS} ${SERVER_USER}@${SERVER_HOST} "mkdir -p ${DEPLOY_DIR}"
+            tar --exclude=.git \
+                --exclude=bin \
+                --exclude=vendor \
+                --exclude=*.log \
+                --exclude=coverage.out \
+                --exclude=.scannerwork \
+                -czf - . | ssh ${SSH_OPTS} ${SERVER_USER}@${SERVER_HOST} "tar -xzf - -C ${DEPLOY_DIR}"
+            echo "Code successfully synchronized to ${DEPLOY_DIR}"
           '''
         }
       }
     }
 
-    stage('Deploy Environment') {
-      steps {
-        withCredentials([
-          file(
-            credentialsId: env.ENV_CREDENTIAL,
-            variable: 'SECRET_ENV_FILE'
-          )
-        ]) {
-          sshagent([env.SSH_CREDENTIAL]) {
-            sh '''
-              ssh -o StrictHostKeyChecking=yes \
-                ${VPS_USER}@${VPS_HOST} \
-                "rm -f ${VPS_DIR}/.env.new"
-
-              scp -o StrictHostKeyChecking=yes \
-                "$SECRET_ENV_FILE" \
-                ${VPS_USER}@${VPS_HOST}:${VPS_DIR}/.env.new
-
-              ssh -o StrictHostKeyChecking=yes \
-                ${VPS_USER}@${VPS_HOST} \
-                "chmod 600 ${VPS_DIR}/.env.new && \
-                 mv -f ${VPS_DIR}/.env.new ${VPS_DIR}/.env && \
-                 echo 'Environment file successfully configured.'"
-            '''
-          }
-        }
+    stage('Unit Test & Coverage (Podman)') {
+      when {
+        expression { env.OPT_RUN_TESTS == 'true' }
       }
-    }
-
-    stage('Prepare Network & Shared Services') {
       steps {
         sshagent([env.SSH_CREDENTIAL]) {
           sh '''
-            ssh -o StrictHostKeyChecking=yes ${VPS_USER}@${VPS_HOST} \
-              "cd ${VPS_DIR} && GHCR_NAMESPACE=${GHCR_NAMESPACE} VERSION=${VERSION} bash -s" <<'REMOTE'
-set -eu
-NETWORK=portfolio_default
-if ! podman network exists "$NETWORK" 2>/dev/null; then
-  podman network create "$NETWORK" >/dev/null
-  echo "Network $NETWORK created."
-fi
+            echo "Running Unit Tests & generating coverage on Homeserver..."
+            ssh ${SSH_OPTS} ${SERVER_USER}@${SERVER_HOST} "
+              cd ${DEPLOY_DIR}
+              podman run --rm \
+                -v ${DEPLOY_DIR}:/app:Z \
+                -w /app \
+                docker.io/library/golang:alpine \
+                sh -c 'go test -v -coverprofile=coverage.out ./...'
+            "
 
-connect_shared_container() {
-  container=$1
-  alias=$2
-  if ! podman container exists "$container"; then
-    echo "Required shared container '$container' is not running or does not exist." >&2
-    exit 1
-  fi
+            echo "Retrieving coverage.out back to Jenkins workspace..."
+            ssh ${SSH_OPTS} ${SERVER_USER}@${SERVER_HOST} "cat ${DEPLOY_DIR}/coverage.out 2>/dev/null" > coverage.out || true
 
-  if podman inspect "$container" --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' 2>/dev/null | grep -qw "$NETWORK"; then
-    echo "Shared container '$container' is already connected to $NETWORK."
-  else
-    if out=$(podman network connect --alias "$alias" "$NETWORK" "$container" 2>&1); then
-      echo "Connected shared container '$container' to $NETWORK as '$alias'."
-    elif echo "$out" | grep -qi "already connected"; then
-      echo "Shared container '$container' is already connected to $NETWORK."
-    else
-      echo "Failed to connect '$container' to $NETWORK: $out" >&2
-      exit 1
-    fi
-  fi
-}
-
-connect_shared_container postgres postgres
-connect_shared_container minio minio
-
-for attempt in $(seq 1 30); do
-  if podman exec postgres pg_isready -U postgres -d postgres >/dev/null 2>&1; then
-    break
-  fi
-  echo "Waiting for shared PostgreSQL (attempt $attempt/30)..."
-  sleep 2
-done
-
-if ! podman exec postgres pg_isready -U postgres -d postgres >/dev/null 2>&1; then
-  echo "Shared PostgreSQL did not become ready." >&2
-  podman logs --tail 50 postgres 2>/dev/null || true
-  exit 1
-fi
-
-if ! podman exec postgres psql -U postgres -d postgres -tAc \
-  "SELECT 1 FROM pg_database WHERE datname = 'portfolio'" | grep -qx 1; then
-  podman exec postgres psql -U postgres -d postgres -c "CREATE DATABASE portfolio;"
-fi
-
-echo "Shared PostgreSQL is ready and database 'portfolio' exists."
-REMOTE
+            if [ -s coverage.out ]; then
+              echo "coverage.out successfully fetched (\$(wc -l < coverage.out) lines)."
+            else
+              echo "WARNING: coverage.out is empty or not found."
+            fi
           '''
         }
       }
     }
 
-    stage('Pull Image on Homeserver') {
+    stage('SonarQube Analysis') {
+      when {
+        expression { env.OPT_RUN_SONAR == 'true' }
+      }
       steps {
-        withCredentials([
-          usernamePassword(
-            credentialsId: env.GHCR_CREDENTIAL,
-            usernameVariable: 'GHCR_USER',
-            passwordVariable: 'GHCR_TOKEN'
-          )
-        ]) {
+        withCredentials([string(credentialsId: env.SONAR_CREDENTIAL, variable: 'SONAR_TOKEN')]) {
           sshagent([env.SSH_CREDENTIAL]) {
             sh '''
               set +x
-              case "$GHCR_USER" in
-                ''|*[!A-Za-z0-9-]*)
-                  echo "GHCR credential username contains unsupported characters." >&2
-                  exit 1
-                  ;;
-              esac
+              echo "Executing SonarScanner on Homeserver via Podman..."
+              ssh ${SSH_OPTS} ${SERVER_USER}@${SERVER_HOST} "
+                cd ${DEPLOY_DIR}
+                podman run --rm \
+                  --network host \
+                  -v ${DEPLOY_DIR}:/usr/src:Z \
+                  -w /usr/src \
+                  docker.io/sonarsource/sonar-scanner-cli \
+                  sonar-scanner \
+                  -Dsonar.token='${SONAR_TOKEN}' \
+                  -Dsonar.host.url='${SONAR_HOST_URL}' \
+                  -Dsonar.ws.timeout=300 \
+                  -Dsonar.working.directory=/usr/src/.scannerwork
+              "
 
-              REMOTE_SCRIPT='set -eu
-              IFS= read -r TOKEN
-              printf "%s" "$TOKEN" | podman login ghcr.io --username "$1" --password-stdin
-              trap "podman logout ghcr.io >/dev/null 2>&1 || true" EXIT
-              cd "$2"
-              GHCR_NAMESPACE="$3" VERSION="$4" "$HOME/.local/bin/podman-compose" pull api'
+              echo "Pulling .scannerwork report back to Jenkins workspace for UI integration..."
+              ssh ${SSH_OPTS} ${SSH_USER}@${SERVER_HOST} "tar -czf - -C ${DEPLOY_DIR} .scannerwork 2>/dev/null" | tar -xzf - 2>/dev/null || true
 
-              printf '%s\n' "$GHCR_TOKEN" | ssh -T -o StrictHostKeyChecking=yes ${VPS_USER}@${VPS_HOST} "sh -c '$REMOTE_SCRIPT' sh $GHCR_USER $VPS_DIR $GHCR_NAMESPACE $VERSION"
+              if [ -f .scannerwork/report-task.txt ]; then
+                echo "SonarQube report-task.txt retrieved successfully."
+                cat .scannerwork/report-task.txt
+              else
+                echo "WARNING: .scannerwork/report-task.txt not found."
+              fi
             '''
           }
         }
       }
     }
 
-    stage('Deploy API') {
+    stage('Transfer Secret Environment') {
+      steps {
+        withCredentials([file(credentialsId: env.ENV_CREDENTIAL, variable: 'SECRET_ENV_FILE')]) {
+          sshagent([env.SSH_CREDENTIAL]) {
+            sh '''
+              echo "Transferring .env secret to ${DEPLOY_DIR}..."
+              ssh ${SSH_OPTS} ${SERVER_USER}@${SERVER_HOST} "rm -f ${DEPLOY_DIR}/.env"
+              scp ${SSH_OPTS} "$SECRET_ENV_FILE" ${SERVER_USER}@${SERVER_HOST}:${DEPLOY_DIR}/.env
+              ssh ${SSH_OPTS} ${SERVER_USER}@${SERVER_HOST} "chmod 600 ${DEPLOY_DIR}/.env"
+              echo "Environment file successfully secured with permission 600."
+            '''
+          }
+        }
+      }
+    }
+
+    stage('Build Container Image') {
       steps {
         sshagent([env.SSH_CREDENTIAL]) {
           sh '''
-            ssh -o StrictHostKeyChecking=yes \
-              ${VPS_USER}@${VPS_HOST} \
-              "cd ${VPS_DIR} && \
-               podman rm -f portfolio-api 2>/dev/null || true; \
-               GHCR_NAMESPACE=${GHCR_NAMESPACE} VERSION=${VERSION} ${PODMAN_COMPOSE} up -d api"
+            echo "Building Podman container image on Homeserver..."
+            ssh ${SSH_OPTS} ${SERVER_USER}@${SERVER_HOST} "
+              cd ${DEPLOY_DIR}
+              podman build -t ${IMAGE_NAME}:latest -f Dockerfile .
+            "
+            echo "Container image ${IMAGE_NAME}:latest successfully built."
+          '''
+        }
+      }
+    }
+
+    stage('Run Podman Container') {
+      steps {
+        sshagent([env.SSH_CREDENTIAL]) {
+          sh '''
+            echo "Starting container ${CONTAINER_NAME} on Homeserver..."
+            ssh ${SSH_OPTS} ${SERVER_USER}@${SERVER_HOST} "
+              echo 'Stopping existing container if running...'
+              podman stop ${CONTAINER_NAME} 2>/dev/null || true
+              podman rm -f ${CONTAINER_NAME} 2>/dev/null || true
+
+              echo 'Launching new container instance...'
+              podman run -d \
+                --name ${CONTAINER_NAME} \
+                --restart always \
+                --network host \
+                --env-file ${DEPLOY_DIR}/.env \
+                -e PORT='${APP_PORT}' \
+                ${IMAGE_NAME}:latest
+
+              echo 'Container launched successfully.'
+              podman ps --filter name=${CONTAINER_NAME}
+            "
           '''
         }
       }
@@ -272,34 +232,28 @@ REMOTE
       steps {
         sshagent([env.SSH_CREDENTIAL]) {
           sh '''
-            ssh -o StrictHostKeyChecking=yes ${VPS_USER}@${VPS_HOST} 'bash -s' <<'REMOTE'
-set -u
-echo "Verifying API health status..."
-for i in $(seq 1 30); do
-  STATUS=$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:3004/api/health || true)
-  if [ "$STATUS" = "200" ] || [ "$STATUS" = "204" ]; then
-    echo "API health check passed (attempt $i/30, status $STATUS)"
-    exit 0
-  fi
-  echo "Attempt $i/30: HTTP status $STATUS. Retrying in 2 seconds..."
-  sleep 2
-done
-echo "API health check failed after 60 seconds"
-podman logs --tail 50 portfolio-api 2>/dev/null || true
-exit 1
-REMOTE
-          '''
-        }
-      }
-    }
+            echo "Validating application health endpoint http://127.0.0.1:${APP_PORT}${HEALTH_ENDPOINT}..."
+            ssh ${SSH_OPTS} ${SERVER_USER}@${SERVER_HOST} "
+              HEALTH_URL='http://127.0.0.1:${APP_PORT}${HEALTH_ENDPOINT}'
+              SUCCESS=0
+              for i in \$(seq 1 30); do
+                HTTP_CODE=\$(curl -s -o /dev/null -w '%{http_code}' \$HEALTH_URL || echo '000')
+                if [ \"\$HTTP_CODE\" = '200' ] || [ \"\$HTTP_CODE\" = '204' ]; then
+                  echo \"Application is healthy! (HTTP \$HTTP_CODE) [Attempt \$i/30]\"
+                  SUCCESS=1
+                  break
+                fi
+                echo \"Waiting for application to become healthy... (HTTP \$HTTP_CODE) [Attempt \$i/30]\"
+                sleep 2
+              done
 
-    stage('Prune Dangling Images') {
-      steps {
-        sshagent([env.SSH_CREDENTIAL]) {
-          sh '''
-            ssh -o StrictHostKeyChecking=yes \
-              ${VPS_USER}@${VPS_HOST} \
-              "${PODMAN} image prune -f"
+              if [ \$SUCCESS -ne 1 ]; then
+                echo \"Health check failed after 30 attempts!\" >&2
+                echo \"=== Last 50 Container Logs ===\" >&2
+                podman logs --tail 50 ${CONTAINER_NAME} >&2
+                exit 1
+              fi
+            "
           '''
         }
       }
@@ -308,25 +262,13 @@ REMOTE
 
   post {
     always {
-      sh '''
-        export PATH="/Applications/Docker.app/Contents/Resources/bin:$PATH"
-        docker image prune -f >/dev/null 2>&1 || true
-      '''
+      archiveArtifacts artifacts: 'coverage.out, .scannerwork/**', allowEmptyArchive: true
     }
     success {
-      echo '''
-======================================
-PORTFOLIO BACKEND DEPLOYMENT SUCCESS
-======================================
-'''
+      echo "Pipeline completed successfully! Application is running on port ${APP_PORT}."
     }
     failure {
-      echo '''
-======================================
-PORTFOLIO BACKEND DEPLOYMENT FAILED
-======================================
-Check the Jenkins log output above.
-'''
+      echo "Pipeline execution failed. Please check stage logs for details."
     }
   }
 }

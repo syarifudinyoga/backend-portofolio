@@ -3,3 +3,5 @@
 portfolio-api
 .DS_Store
 backend.env
+coverage.out
+.scannerwork/
