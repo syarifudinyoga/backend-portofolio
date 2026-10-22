@@ -181,7 +181,9 @@ REMOTE
               "DEPLOY_DIR='${DEPLOY_DIR}' SONAR_TOKEN='${SONAR_TOKEN}' SONAR_HOST_URL='${SONAR_HOST_URL}' bash -s" <<'REMOTE'
 set -e
 cd "${DEPLOY_DIR}"
+mkdir -p "${DEPLOY_DIR}/.scannerwork"
 podman run --rm \
+  --user 0 \
   --network host \
   -v "${DEPLOY_DIR}:/usr/src:Z" \
   -w /usr/src \
@@ -189,6 +191,7 @@ podman run --rm \
   sonar-scanner \
   -Dsonar.token="${SONAR_TOKEN}" \
   -Dsonar.host.url="${SONAR_HOST_URL}" \
+  -Dsonar.scanner.socketTimeout=300 \
   -Dsonar.ws.timeout=300 \
   -Dsonar.working.directory=/usr/src/.scannerwork
 REMOTE
