@@ -49,7 +49,8 @@ pipeline {
     // ==========================================
     ENV_CREDENTIAL   = 'portfolio-backend-env'
     SONAR_CREDENTIAL = 'sonar-devlabhub'
-    SONAR_HOST_URL   = 'https://sonarqube.devlabhub.id'
+    SONAR_HOST_URL   = 'http://127.0.0.1:9002'
+    SONAR_PUBLIC_URL = 'https://sonarqube.devlabhub.id'
 
     // Mapping params to environment to avoid shell bad substitution
     OPT_BRANCH       = "${params.BRANCH}"
@@ -205,9 +206,11 @@ REMOTE
 set -e
 cd "${DEPLOY_DIR}"
 mkdir -p "${DEPLOY_DIR}/.scannerwork"
+mkdir -p /home/devlabhub/.cache/sonar
 podman run --rm \
   --user 0 \
   --network host \
+  -v "/home/devlabhub/.cache/sonar:/opt/sonar-scanner/.sonar/cache:Z" \
   -v "${DEPLOY_DIR}:/usr/src:Z" \
   -w /usr/src \
   docker.io/sonarsource/sonar-scanner-cli \
@@ -223,7 +226,9 @@ REMOTE
               ssh -i "${SSH_KEY}" ${SSH_OPTS} ${SERVER_USER}@${SERVER_HOST} "tar -czf - -C ${DEPLOY_DIR} .scannerwork 2>/dev/null" | tar -xzf - 2>/dev/null || true
 
               if [ -f .scannerwork/report-task.txt ]; then
-                echo "SonarQube report-task.txt retrieved successfully."
+                echo "Patching report-task.txt with public URL (${SONAR_PUBLIC_URL})..."
+                sed -i "s|${SONAR_HOST_URL}|${SONAR_PUBLIC_URL}|g" .scannerwork/report-task.txt
+                echo "SonarQube report-task.txt retrieved successfully:"
                 cat .scannerwork/report-task.txt
               else
                 echo "WARNING: .scannerwork/report-task.txt not found."
