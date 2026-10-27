@@ -49,7 +49,7 @@ pipeline {
     // ==========================================
     ENV_CREDENTIAL   = 'portfolio-backend-env'
     SONAR_CREDENTIAL = 'sonar-devlabhub'
-    SONAR_HOST_URL   = 'http://127.0.0.1:9002'
+    SONAR_HOST_URL   = 'https://sonarqube.devlabhub.id'
 
     // Mapping params to environment to avoid shell bad substitution
     OPT_BRANCH       = "${params.BRANCH}"
@@ -192,15 +192,16 @@ REMOTE
         expression { env.OPT_RUN_SONAR == 'true' }
       }
       steps {
-        withCredentials([
-          sshUserPrivateKey(credentialsId: env.SSH_CREDENTIAL, keyFileVariable: 'SSH_KEY'),
-          string(credentialsId: env.SONAR_CREDENTIAL, variable: 'SONAR_TOKEN')
-        ]) {
-          sh '''
-            set +x
-            echo "Executing SonarScanner on Homeserver via Podman..."
-            ssh -i "${SSH_KEY}" ${SSH_OPTS} ${SERVER_USER}@${SERVER_HOST} \
-              "DEPLOY_DIR='${DEPLOY_DIR}' SONAR_TOKEN='${SONAR_TOKEN}' SONAR_HOST_URL='${SONAR_HOST_URL}' bash -s" <<'REMOTE'
+        withSonarQubeEnv() {
+          withCredentials([
+            sshUserPrivateKey(credentialsId: env.SSH_CREDENTIAL, keyFileVariable: 'SSH_KEY'),
+            string(credentialsId: env.SONAR_CREDENTIAL, variable: 'SONAR_TOKEN')
+          ]) {
+            sh '''
+              set +x
+              echo "Executing SonarScanner on Homeserver via Podman..."
+              ssh -i "${SSH_KEY}" ${SSH_OPTS} ${SERVER_USER}@${SERVER_HOST} \
+                "DEPLOY_DIR='${DEPLOY_DIR}' SONAR_TOKEN='${SONAR_TOKEN}' SONAR_HOST_URL='${SONAR_HOST_URL}' bash -s" <<'REMOTE'
 set -e
 cd "${DEPLOY_DIR}"
 mkdir -p "${DEPLOY_DIR}/.scannerwork"
@@ -218,16 +219,17 @@ podman run --rm \
   -Dsonar.working.directory=/usr/src/.scannerwork
 REMOTE
 
-            echo "Pulling .scannerwork report back to Jenkins workspace for UI integration..."
-            ssh -i "${SSH_KEY}" ${SSH_OPTS} ${SERVER_USER}@${SERVER_HOST} "tar -czf - -C ${DEPLOY_DIR} .scannerwork 2>/dev/null" | tar -xzf - 2>/dev/null || true
+              echo "Pulling .scannerwork report back to Jenkins workspace for UI integration..."
+              ssh -i "${SSH_KEY}" ${SSH_OPTS} ${SERVER_USER}@${SERVER_HOST} "tar -czf - -C ${DEPLOY_DIR} .scannerwork 2>/dev/null" | tar -xzf - 2>/dev/null || true
 
-            if [ -f .scannerwork/report-task.txt ]; then
-              echo "SonarQube report-task.txt retrieved successfully."
-              cat .scannerwork/report-task.txt
-            else
-              echo "WARNING: .scannerwork/report-task.txt not found."
-            fi
-          '''
+              if [ -f .scannerwork/report-task.txt ]; then
+                echo "SonarQube report-task.txt retrieved successfully."
+                cat .scannerwork/report-task.txt
+              else
+                echo "WARNING: .scannerwork/report-task.txt not found."
+              fi
+            '''
+          }
         }
       }
     }
