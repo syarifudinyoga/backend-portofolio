@@ -49,7 +49,7 @@ pipeline {
     // ==========================================
     ENV_CREDENTIAL   = 'portfolio-backend-env'
     SONAR_CREDENTIAL = 'sonar-devlabhub'
-    SONAR_HOST_URL   = 'http://127.0.0.1:9002'
+    SONAR_LOCAL_URL  = 'http://127.0.0.1:9002'
     SONAR_PUBLIC_URL = 'https://sonarqube.devlabhub.id'
 
     // Mapping params to environment to avoid shell bad substitution
@@ -202,7 +202,7 @@ REMOTE
               set +x
               echo "Executing SonarScanner on Homeserver via Podman..."
               ssh -i "${SSH_KEY}" ${SSH_OPTS} ${SERVER_USER}@${SERVER_HOST} \
-                "DEPLOY_DIR='${DEPLOY_DIR}' SONAR_TOKEN='${SONAR_TOKEN}' SONAR_HOST_URL='${SONAR_HOST_URL}' bash -s" <<'REMOTE'
+                "DEPLOY_DIR='${DEPLOY_DIR}' SONAR_TOKEN='${SONAR_TOKEN}' SONAR_LOCAL_URL='${SONAR_LOCAL_URL}' bash -s" <<'REMOTE'
 set -e
 cd "${DEPLOY_DIR}"
 mkdir -p "${DEPLOY_DIR}/.scannerwork"
@@ -216,7 +216,7 @@ podman run --rm \
   docker.io/sonarsource/sonar-scanner-cli \
   sonar-scanner \
   -Dsonar.token="${SONAR_TOKEN}" \
-  -Dsonar.host.url="${SONAR_HOST_URL}" \
+  -Dsonar.host.url="${SONAR_LOCAL_URL}" \
   -Dsonar.scanner.socketTimeout=300 \
   -Dsonar.ws.timeout=300 \
   -Dsonar.working.directory=/usr/src/.scannerwork
@@ -226,8 +226,10 @@ REMOTE
               ssh -i "${SSH_KEY}" ${SSH_OPTS} ${SERVER_USER}@${SERVER_HOST} "tar -czf - -C ${DEPLOY_DIR} .scannerwork 2>/dev/null" | tar -xzf - 2>/dev/null || true
 
               if [ -f .scannerwork/report-task.txt ]; then
-                echo "Patching report-task.txt with public URL (${SONAR_PUBLIC_URL})..."
-                sed -i "s|${SONAR_HOST_URL}|${SONAR_PUBLIC_URL}|g" .scannerwork/report-task.txt
+                echo "Patching report-task.txt with public URL..."
+                sed -i "s|${SONAR_LOCAL_URL}|${SONAR_PUBLIC_URL}|g" .scannerwork/report-task.txt
+                sed -i "s|devlabhub.iddashboard|devlabhub.id/dashboard|g" .scannerwork/report-task.txt
+                sed -i "s|devlabhub.id//|devlabhub.id/|g" .scannerwork/report-task.txt
                 echo "SonarQube report-task.txt retrieved successfully:"
                 cat .scannerwork/report-task.txt
               else
