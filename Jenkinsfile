@@ -192,7 +192,7 @@ REMOTE
         expression { env.OPT_RUN_SONAR == 'true' }
       }
       steps {
-        withSonarQubeEnv() {
+        withSonarQubeEnv(installationName: 'sonarqube') {
           withCredentials([
             sshUserPrivateKey(credentialsId: env.SSH_CREDENTIAL, keyFileVariable: 'SSH_KEY'),
             string(credentialsId: env.SONAR_CREDENTIAL, variable: 'SONAR_TOKEN')
