@@ -163,6 +163,7 @@ func main() {
 		}
 		w.WriteHeader(http.StatusNoContent)
 	})
+	mux.HandleFunc("POST /api/session", handleSession)
 	mux.HandleFunc("GET /api/portfolio", func(w http.ResponseWriter, r *http.Request) {
 		data, err := loadPortfolio(r.Context(), pool)
 		if err != nil {
@@ -170,7 +171,7 @@ func main() {
 			http.Error(w, "could not load portfolio", http.StatusInternalServerError)
 			return
 		}
-		if err := writeEncryptedJSON(w, http.StatusOK, data); err != nil {
+		if err := writeEncryptedJSON(w, r, http.StatusOK, data); err != nil {
 			logger.Printf("write encrypted portfolio response: %v", err)
 		}
 	})
@@ -534,7 +535,7 @@ func withHeaders(next http.Handler) http.Handler {
 
 		w.Header().Set("Vary", "Origin, Access-Control-Request-Method, Access-Control-Request-Headers")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Accept, X-Payload-Encrypted, Origin")
+		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Accept, X-Payload-Encrypted, X-Session-Id, Origin")
 		w.Header().Set("Access-Control-Expose-Headers", "Content-Type, Content-Length, X-Payload-Encrypted")
 		w.Header().Set("Access-Control-Max-Age", "86400")
 

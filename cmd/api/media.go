@@ -145,7 +145,7 @@ func (m *mediaStore) handleUpload(w http.ResponseWriter, r *http.Request, logger
 		http.Error(w, "gagal menyimpan ke MinIO: "+err.Error(), http.StatusBadGateway)
 		return
 	}
-	if err := writeEncryptedJSON(w, http.StatusCreated, map[string]string{"url": "/api/media/" + name}); err != nil {
+	if err := writeEncryptedJSON(w, r, http.StatusCreated, map[string]string{"url": "/api/media/" + name}); err != nil {
 		logger.Printf("minio: encrypt upload response failed: %v", err)
 	}
 }

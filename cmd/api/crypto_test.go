@@ -2,6 +2,10 @@ package main
 
 import (
 	"bytes"
+	"crypto/ecdh"
+	"crypto/hkdf"
+	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
@@ -10,187 +14,252 @@ import (
 	"testing"
 )
 
-func TestGetEncryptionKey(t *testing.T) {
-	t.Run("default key", func(t *testing.T) {
-		t.Setenv("API_ENCRYPTION_SECRET", "")
-		key := getEncryptionKey()
-		if len(key) != 32 {
-			t.Fatalf("expected 32 bytes key, got %d", len(key))
-		}
-	})
-
-	t.Run("custom key", func(t *testing.T) {
-		t.Setenv("API_ENCRYPTION_SECRET", "custom-secret-password-123")
-		customKey := getEncryptionKey()
-		t.Setenv("API_ENCRYPTION_SECRET", "another-secret-456")
-		anotherKey := getEncryptionKey()
-
-		if bytes.Equal(customKey[:], anotherKey[:]) {
-			t.Fatal("expected different keys for different secrets")
-		}
-	})
+// newTestSession registers a random AES key as an active session and returns its ID and key.
+func newTestSession(t *testing.T) (string, []byte) {
+	t.Helper()
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	id := base64.RawURLEncoding.EncodeToString(key[:16])
+	if err := sessions.put(id, key); err != nil {
+		t.Fatalf("put session: %v", err)
+	}
+	return id, key
 }
 
-func TestEncryptDecryptData(t *testing.T) {
-	t.Setenv("API_ENCRYPTION_SECRET", "test-secret-key-32-bytes-long!")
-	original := []byte("Hello, SonarQube & Unit Testing in Go!")
+func TestEncryptDecryptRoundTrip(t *testing.T) {
+	key := bytes.Repeat([]byte{7}, 32)
+	original := []byte(`{"hello":"world"}`)
 
-	envelope, err := encryptData(original)
+	envelope, err := encryptData(key, original)
 	if err != nil {
 		t.Fatalf("encryptData failed: %v", err)
 	}
-
-	if !envelope.Encrypted {
-		t.Fatal("envelope.Encrypted should be true")
-	}
-	if envelope.IV == "" || envelope.Data == "" {
-		t.Fatal("envelope IV and Data must not be empty")
+	if !envelope.Encrypted || envelope.IV == "" || envelope.Data == "" {
+		t.Fatalf("invalid envelope: %+v", envelope)
 	}
 
-	decrypted, err := decryptData(envelope.IV, envelope.Data)
+	decrypted, err := decryptData(key, envelope.IV, envelope.Data)
 	if err != nil {
 		t.Fatalf("decryptData failed: %v", err)
 	}
-
-	if string(decrypted) != string(original) {
-		t.Fatalf("decrypted data %q != original %q", string(decrypted), string(original))
+	if !bytes.Equal(decrypted, original) {
+		t.Fatalf("expected %q, got %q", original, decrypted)
 	}
 }
 
 func TestDecryptDataErrors(t *testing.T) {
-	t.Setenv("API_ENCRYPTION_SECRET", "test-secret-key-32-bytes-long!")
+	key := bytes.Repeat([]byte{7}, 32)
 
-	t.Run("invalid iv base64", func(t *testing.T) {
-		_, err := decryptData("!not-base64!", "validbase64==")
-		if err == nil {
-			t.Fatal("expected error for invalid IV base64")
+	t.Run("invalid key size", func(t *testing.T) {
+		if _, err := encryptData([]byte("short"), []byte("x")); err == nil {
+			t.Fatal("expected error for invalid key size")
+		}
+		if _, err := decryptData([]byte("short"), "a", "b"); err == nil {
+			t.Fatal("expected error for invalid key size")
 		}
 	})
-
+	t.Run("invalid base64 iv", func(t *testing.T) {
+		if _, err := decryptData(key, "!not-base64!", "validbase64=="); err == nil {
+			t.Fatal("expected error")
+		}
+	})
 	t.Run("invalid nonce size", func(t *testing.T) {
-		shortNonce := base64.StdEncoding.EncodeToString([]byte("short"))
-		_, err := decryptData(shortNonce, "validbase64==")
-		if err == nil {
-			t.Fatal("expected error for invalid nonce size")
+		short := base64.StdEncoding.EncodeToString([]byte("short"))
+		if _, err := decryptData(key, short, "validbase64=="); err == nil {
+			t.Fatal("expected error")
 		}
 	})
-
-	t.Run("invalid ciphertext base64", func(t *testing.T) {
-		validNonce := base64.StdEncoding.EncodeToString(make([]byte, 12))
-		_, err := decryptData(validNonce, "!not-base64!")
-		if err == nil {
-			t.Fatal("expected error for invalid ciphertext base64")
+	t.Run("invalid base64 data", func(t *testing.T) {
+		iv := base64.StdEncoding.EncodeToString(make([]byte, 12))
+		if _, err := decryptData(key, iv, "!not-base64!"); err == nil {
+			t.Fatal("expected error")
 		}
 	})
-
-	t.Run("corrupted ciphertext", func(t *testing.T) {
-		envelope, err := encryptData([]byte("test message"))
+	t.Run("tampered ciphertext and wrong key", func(t *testing.T) {
+		envelope, err := encryptData(key, []byte("test message"))
 		if err != nil {
 			t.Fatalf("encryptData failed: %v", err)
 		}
-		// Tamper with data
-		corruptedData := base64.StdEncoding.EncodeToString([]byte("corruptedciphertextlongerthan16bytes"))
-		_, err = decryptData(envelope.IV, corruptedData)
-		if err == nil {
-			t.Fatal("expected decryption error for tampered ciphertext")
+		if _, err := decryptData(key, envelope.IV, base64.StdEncoding.EncodeToString([]byte("garbage-garbage-garbage"))); err == nil {
+			t.Fatal("expected error for tampered ciphertext")
+		}
+		if _, err := decryptData(bytes.Repeat([]byte{9}, 32), envelope.IV, envelope.Data); err == nil {
+			t.Fatal("expected error for wrong key")
 		}
 	})
 }
 
-func TestWriteEncryptedJSON(t *testing.T) {
-	t.Setenv("API_ENCRYPTION_SECRET", "test-secret-key-for-write-json")
-	rec := httptest.NewRecorder()
-
-	payload := map[string]string{"status": "ok", "project": "portfolio"}
-	err := writeEncryptedJSON(rec, http.StatusAccepted, payload)
-	if err != nil {
-		t.Fatalf("writeEncryptedJSON failed: %v", err)
+func TestHandleSession(t *testing.T) {
+	post := func(body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/session", strings.NewReader(body))
+		rec := httptest.NewRecorder()
+		handleSession(rec, req)
+		return rec
 	}
 
-	if rec.Code != http.StatusAccepted {
-		t.Fatalf("expected status %d, got %d", http.StatusAccepted, rec.Code)
-	}
-	if rec.Header().Get("X-Payload-Encrypted") != "true" {
-		t.Fatalf("expected X-Payload-Encrypted header to be 'true'")
-	}
-	if !strings.Contains(rec.Header().Get("Content-Type"), "application/json") {
-		t.Fatalf("expected Content-Type application/json, got %q", rec.Header().Get("Content-Type"))
-	}
+	t.Run("derives matching key on both sides", func(t *testing.T) {
+		clientPriv, err := ecdh.P256().GenerateKey(rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := json.Marshal(sessionRequest{PublicKey: base64.StdEncoding.EncodeToString(clientPriv.PublicKey().Bytes())})
+		rec := post(string(body))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+		var resp sessionResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatal(err)
+		}
 
-	var env encryptedEnvelope
-	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
-		t.Fatalf("failed to decode response as encryptedEnvelope: %v", err)
-	}
+		rawServerPub, _ := base64.StdEncoding.DecodeString(resp.PublicKey)
+		serverPub, err := ecdh.P256().NewPublicKey(rawServerPub)
+		if err != nil {
+			t.Fatal(err)
+		}
+		shared, err := clientPriv.ECDH(serverPub)
+		if err != nil {
+			t.Fatal(err)
+		}
+		salt, _ := base64.RawURLEncoding.DecodeString(resp.SessionID)
+		clientKey, err := hkdf.Key(sha256.New, shared, salt, sessionKDFInfo, 32)
+		if err != nil {
+			t.Fatal(err)
+		}
 
-	decrypted, err := decryptData(env.IV, env.Data)
-	if err != nil {
-		t.Fatalf("failed to decrypt response data: %v", err)
-	}
+		serverKey, ok := sessions.get(resp.SessionID)
+		if !ok {
+			t.Fatal("session was not stored")
+		}
+		if !bytes.Equal(serverKey, clientKey) {
+			t.Fatal("derived keys differ")
+		}
+	})
 
-	var res map[string]string
-	if err := json.Unmarshal(decrypted, &res); err != nil {
-		t.Fatalf("failed to unmarshal decrypted payload: %v", err)
+	t.Run("rejects invalid input", func(t *testing.T) {
+		for _, body := range []string{`{bad`, `{"publicKey":"!!"}`, `{"publicKey":"AAAA"}`} {
+			if rec := post(body); rec.Code != http.StatusBadRequest {
+				t.Fatalf("body %q: expected 400, got %d", body, rec.Code)
+			}
+		}
+	})
+}
+
+func TestSessionStoreExpiry(t *testing.T) {
+	store := &sessionStore{sessions: map[string]cryptoSession{}}
+	if err := store.put("a", []byte("k")); err != nil {
+		t.Fatal(err)
 	}
-	if res["project"] != "portfolio" {
-		t.Fatalf("unexpected decrypted value: %v", res)
+	if _, ok := store.get("a"); !ok {
+		t.Fatal("expected active session")
+	}
+	s := store.sessions["a"]
+	s.expires = s.expires.Add(-2 * sessionTTL)
+	store.sessions["a"] = s
+	if _, ok := store.get("a"); ok {
+		t.Fatal("expected expired session to be rejected")
+	}
+	if _, ok := store.get("missing"); ok {
+		t.Fatal("expected missing session to be rejected")
 	}
 }
 
+func TestWriteEncryptedJSON(t *testing.T) {
+	id, key := newTestSession(t)
+
+	t.Run("encrypts with session key", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.Header.Set(sessionHeader, id)
+		rec := httptest.NewRecorder()
+
+		if err := writeEncryptedJSON(rec, req, http.StatusAccepted, map[string]string{"project": "portfolio"}); err != nil {
+			t.Fatalf("writeEncryptedJSON failed: %v", err)
+		}
+		if rec.Code != http.StatusAccepted {
+			t.Fatalf("expected status %d, got %d", http.StatusAccepted, rec.Code)
+		}
+		if rec.Header().Get("X-Payload-Encrypted") != "true" {
+			t.Fatal("expected X-Payload-Encrypted header")
+		}
+
+		var env encryptedEnvelope
+		if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+			t.Fatal(err)
+		}
+		decrypted, err := decryptData(key, env.IV, env.Data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var res map[string]string
+		if err := json.Unmarshal(decrypted, &res); err != nil || res["project"] != "portfolio" {
+			t.Fatalf("unexpected payload: %v %v", res, err)
+		}
+	})
+
+	t.Run("requires session", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		rec := httptest.NewRecorder()
+		_ = writeEncryptedJSON(rec, req, http.StatusOK, map[string]string{"a": "b"})
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("expected 401, got %d", rec.Code)
+		}
+		if !strings.Contains(rec.Body.String(), "sesi enkripsi") {
+			t.Fatalf("unexpected body: %q", rec.Body.String())
+		}
+	})
+}
+
 func TestReadPayload(t *testing.T) {
-	t.Setenv("API_ENCRYPTION_SECRET", "test-secret-key-for-read-payload")
+	id, key := newTestSession(t)
 
 	t.Run("plaintext JSON payload", func(t *testing.T) {
-		body := `{"key": "my-secret-key"}`
-		req := httptest.NewRequest(http.MethodPost, "/auth", strings.NewReader(body))
-
+		req := httptest.NewRequest(http.MethodPost, "/auth", strings.NewReader(`{"key": "my-secret-key"}`))
 		var target authRequest
 		if err := readPayload(req, &target); err != nil {
 			t.Fatalf("readPayload plaintext failed: %v", err)
 		}
 		if target.Key != "my-secret-key" {
-			t.Fatalf("expected key %q, got %q", "my-secret-key", target.Key)
+			t.Fatalf("unexpected key %q", target.Key)
 		}
 	})
 
 	t.Run("encrypted envelope payload", func(t *testing.T) {
-		original := authRequest{Key: "secret-bearer-token"}
-		raw, err := json.Marshal(original)
+		raw, _ := json.Marshal(authRequest{Key: "secret-bearer-token"})
+		envelope, err := encryptData(key, raw)
 		if err != nil {
-			t.Fatalf("marshal error: %v", err)
+			t.Fatal(err)
 		}
-
-		envelope, err := encryptData(raw)
-		if err != nil {
-			t.Fatalf("encryptData failed: %v", err)
-		}
-
-		envelopeBytes, err := json.Marshal(envelope)
-		if err != nil {
-			t.Fatalf("marshal envelope failed: %v", err)
-		}
+		envelopeBytes, _ := json.Marshal(envelope)
 
 		req := httptest.NewRequest(http.MethodPost, "/auth", bytes.NewReader(envelopeBytes))
+		req.Header.Set(sessionHeader, id)
 		var target authRequest
 		if err := readPayload(req, &target); err != nil {
 			t.Fatalf("readPayload encrypted failed: %v", err)
 		}
-		if target.Key != original.Key {
-			t.Fatalf("expected key %q, got %q", original.Key, target.Key)
+		if target.Key != "secret-bearer-token" {
+			t.Fatalf("unexpected key %q", target.Key)
+		}
+
+		noSession := httptest.NewRequest(http.MethodPost, "/auth", bytes.NewReader(envelopeBytes))
+		if err := readPayload(noSession, &target); err == nil {
+			t.Fatal("expected error without session")
 		}
 	})
 
 	t.Run("invalid encrypted envelope with bad ciphertext", func(t *testing.T) {
-		fakeEnv := encryptedEnvelope{
+		fakeBytes, _ := json.Marshal(encryptedEnvelope{
 			Encrypted: true,
 			IV:        base64.StdEncoding.EncodeToString(make([]byte, 12)),
 			Data:      base64.StdEncoding.EncodeToString([]byte("bad-encrypted-data")),
-		}
-		fakeBytes, _ := json.Marshal(fakeEnv)
+		})
 		req := httptest.NewRequest(http.MethodPost, "/auth", bytes.NewReader(fakeBytes))
-
+		req.Header.Set(sessionHeader, id)
 		var target authRequest
 		if err := readPayload(req, &target); err == nil {
-			t.Fatal("expected error on bad encrypted payload, got nil")
+			t.Fatal("expected error on bad encrypted payload")
 		}
 	})
 
@@ -198,7 +267,7 @@ func TestReadPayload(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPost, "/auth", strings.NewReader(`{invalid-json`))
 		var target authRequest
 		if err := readPayload(req, &target); err == nil {
-			t.Fatal("expected error on malformed json, got nil")
+			t.Fatal("expected error on malformed json")
 		}
 	})
 }

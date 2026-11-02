@@ -335,6 +335,8 @@ func TestHandleParseCV(t *testing.T) {
 
 		req := httptest.NewRequest(http.MethodPost, "/api/admin/parse-cv", &body)
 		req.Header.Set("Content-Type", writer.FormDataContentType())
+		sessionID, _ := newTestSession(t)
+		req.Header.Set(sessionHeader, sessionID)
 		rec := httptest.NewRecorder()
 
 		handleParseCV(rec, req, logger)
@@ -366,6 +368,8 @@ func TestHandleParseCV(t *testing.T) {
 
 		req := httptest.NewRequest(http.MethodPost, "/api/admin/parse-cv", &body)
 		req.Header.Set("Content-Type", writer.FormDataContentType())
+		sessionID, _ := newTestSession(t)
+		req.Header.Set(sessionHeader, sessionID)
 		rec := httptest.NewRecorder()
 
 		handleParseCV(rec, req, logger)
@@ -392,6 +396,8 @@ func TestHandleParseCV(t *testing.T) {
 
 		req := httptest.NewRequest(http.MethodPost, "/api/admin/parse-cv", &body)
 		req.Header.Set("Content-Type", writer.FormDataContentType())
+		sessionID, testKey := newTestSession(t)
+		req.Header.Set(sessionHeader, sessionID)
 		rec := httptest.NewRecorder()
 
 		handleParseCV(rec, req, logger)
@@ -404,7 +410,7 @@ func TestHandleParseCV(t *testing.T) {
 		if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
 			t.Fatalf("failed to unmarshal encrypted response: %v", err)
 		}
-		decrypted, err := decryptData(env.IV, env.Data)
+		decrypted, err := decryptData(testKey, env.IV, env.Data)
 		if err != nil {
 			t.Fatalf("failed to decrypt response: %v", err)
 		}
@@ -427,6 +433,8 @@ func TestHandleParseCV(t *testing.T) {
 
 		req := httptest.NewRequest(http.MethodPost, "/api/admin/parse-cv", &body)
 		req.Header.Set("Content-Type", writer.FormDataContentType())
+		sessionID, _ := newTestSession(t)
+		req.Header.Set(sessionHeader, sessionID)
 		rec := httptest.NewRecorder()
 
 		handleParseCV(rec, req, logger)
@@ -453,6 +461,8 @@ func TestHandleParseCV(t *testing.T) {
 
 		req := httptest.NewRequest(http.MethodPost, "/api/admin/parse-cv", &body)
 		req.Header.Set("Content-Type", writer.FormDataContentType())
+		sessionID, _ := newTestSession(t)
+		req.Header.Set(sessionHeader, sessionID)
 		rec := httptest.NewRecorder()
 
 		handleParseCV(rec, req, logger)

@@ -139,7 +139,7 @@ func handleParseCV(w http.ResponseWriter, r *http.Request, logger *log.Logger) {
 		Summary: summary,
 	}
 
-	if err := writeEncryptedJSON(w, http.StatusOK, resp); err != nil {
+	if err := writeEncryptedJSON(w, r, http.StatusOK, resp); err != nil {
 		logger.Printf("write encrypted parse-cv response: %v", err)
 	}
 }

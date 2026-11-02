@@ -56,6 +56,8 @@ func TestHandleAdminAuth(t *testing.T) {
 	t.Run("valid key", func(t *testing.T) {
 		body := fmt.Sprintf(`{"key": %q}`, configured)
 		req := httptest.NewRequest(http.MethodPost, "/api/admin/auth", strings.NewReader(body))
+		sessionID, sessionKey := newTestSession(t)
+		req.Header.Set(sessionHeader, sessionID)
 		rec := httptest.NewRecorder()
 
 		handleAdminAuth(rec, req)
@@ -66,7 +68,7 @@ func TestHandleAdminAuth(t *testing.T) {
 		if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
 			t.Fatalf("unmarshal error: %v", err)
 		}
-		decrypted, err := decryptData(env.IV, env.Data)
+		decrypted, err := decryptData(sessionKey, env.IV, env.Data)
 		if err != nil {
 			t.Fatalf("decrypt error: %v", err)
 		}

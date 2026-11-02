@@ -33,7 +33,7 @@ func handleAdminAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	if err := writeEncryptedJSON(w, http.StatusOK, map[string]bool{"authenticated": true}); err != nil {
+	if err := writeEncryptedJSON(w, r, http.StatusOK, map[string]bool{"authenticated": true}); err != nil {
 		http.Error(w, "gagal mengenkripsi respons", http.StatusInternalServerError)
 	}
 }
@@ -73,7 +73,7 @@ func handleSavePortfolio(w http.ResponseWriter, r *http.Request, db *pgxpool.Poo
 		http.Error(w, "gagal menyimpan portfolio", http.StatusInternalServerError)
 		return
 	}
-	if err := writeEncryptedJSON(w, http.StatusOK, map[string]string{"message": "perubahan berhasil disimpan"}); err != nil {
+	if err := writeEncryptedJSON(w, r, http.StatusOK, map[string]string{"message": "perubahan berhasil disimpan"}); err != nil {
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
